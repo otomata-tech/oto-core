@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "oto-core"
+version = "1.5.0"
+description = "Oto connector library — API clients for AI agents (no CLI). Façade CLI = oto-cli."
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.28.0",
+    "france-opendata>=0.1.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+google = ["google-auth>=2.0.0", "google-auth-oauthlib>=1.0.0", "google-api-python-client>=2.0.0", "gkeepapi>=0.16.0", "markdown>=3.5"]
+browser = ["o-browser"]
+vivatech = ["o-browser-vivatech"]
+anthropic = ["anthropic>=0.40.0"]
+stock = ["pyarrow>=10.0.0", "pandas>=1.5.0"]
+all = ["oto-core[google,browser,vivatech,anthropic,stock]"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["oto*"]
+namespaces = true

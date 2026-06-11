@@ -1,0 +1,26 @@
+Metadata-Version: 2.4
+Name: oto-core
+Version: 1.5.0
+Summary: Oto connector library — API clients for AI agents (no CLI). Façade CLI = oto-cli.
+Requires-Python: >=3.10
+Requires-Dist: requests>=2.28.0
+Requires-Dist: france-opendata>=0.1.0
+Requires-Dist: python-dotenv>=1.0.0
+Requires-Dist: pyyaml>=6.0
+Provides-Extra: google
+Requires-Dist: google-auth>=2.0.0; extra == "google"
+Requires-Dist: google-auth-oauthlib>=1.0.0; extra == "google"
+Requires-Dist: google-api-python-client>=2.0.0; extra == "google"
+Requires-Dist: gkeepapi>=0.16.0; extra == "google"
+Requires-Dist: markdown>=3.5; extra == "google"
+Provides-Extra: browser
+Requires-Dist: o-browser; extra == "browser"
+Provides-Extra: vivatech
+Requires-Dist: o-browser-vivatech; extra == "vivatech"
+Provides-Extra: anthropic
+Requires-Dist: anthropic>=0.40.0; extra == "anthropic"
+Provides-Extra: stock
+Requires-Dist: pyarrow>=10.0.0; extra == "stock"
+Requires-Dist: pandas>=1.5.0; extra == "stock"
+Provides-Extra: all
+Requires-Dist: oto-core[anthropic,browser,google,stock,vivatech]; extra == "all"
