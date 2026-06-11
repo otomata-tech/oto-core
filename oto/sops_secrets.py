@@ -9,7 +9,7 @@ Lit un ou plusieurs fichiers YAML chiffrés via SOPS + age. Configurable via
 - `sops_file` : un seul fichier (legacy / mono-fichier). Si défini, prioritaire
   sur `sops_dir` et seul ce fichier est lu.
 
-Layout multi-fichiers (cf. otomata-tech/secrets) :
+Layout multi-fichiers (cf. AlexisLaporte/secrets) :
     secrets/
     ├── secrets.yaml         # transverse Otomata
     ├── tuls.yaml            # host
@@ -107,7 +107,7 @@ def fetch_secrets(
         if root is None or not root.is_dir():
             raise FileNotFoundError(
                 f"SOPS secrets dir not found. Tried: {[str(c) for c in _candidate_default_dirs()]}. "
-                f"Clone: git clone git@github.com:otomata-tech/secrets ~/.otomata/secrets"
+                f"Clone: git clone git@github.com:AlexisLaporte/secrets ~/.otomata/secrets"
             )
         yaml_files = sorted(p for p in root.rglob("*.yaml") if p.name != ".sops.yaml")
         if not yaml_files:
