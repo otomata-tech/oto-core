@@ -16,6 +16,13 @@ _secrets_cache: Dict[Path, Dict[str, str]] = {}
 _oto_config_cache: Optional[Dict[str, Any]] = None
 
 
+class AmbiguousSecretError(RuntimeError):
+    """The key exists in the vault but with different values across files.
+
+    Raised by get_secret: returning one of the values would be arbitrary
+    (the key is scoped per project/mission file, not transverse)."""
+
+
 def _parse_env_file(path: Path) -> Dict[str, str]:
     """Parse a .env file into a dictionary."""
     if path in _secrets_cache:
@@ -142,6 +149,9 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     provider's store is absent. The hard failure (with guidance) belongs to
     `require_secret`.
 
+    Exception: a key present in the vault with DIFFERENT values across files
+    raises AmbiguousSecretError — returning one of them would be arbitrary.
+
     Args:
         name: Secret name (e.g., 'GROQ_API_KEY', 'SIRENE_API_KEY')
         default: Default value if not found
@@ -167,7 +177,7 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     provider = get_provider()
     store_missing = False
     if provider == "sops":
-        from oto.sops_secrets import fetch_secrets as _sops_fetch
+        from oto.sops_secrets import fetch_secrets as _sops_fetch, ambiguous_keys
         cfg = _get_oto_config()
         try:
             secrets = _sops_fetch(
@@ -176,6 +186,14 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
             )
             if name in secrets:
                 return secrets[name]
+            if name in ambiguous_keys():
+                files = ambiguous_keys()[name]
+                raise AmbiguousSecretError(
+                    f"Secret '{name}' is defined with DIFFERENT values in several "
+                    f"vault files: {', '.join(files)}. It is scoped per file, not "
+                    f"transverse — read the relevant file directly "
+                    f"(`sops -d <file>`) or pass it via the environment."
+                )
         except FileNotFoundError:
             store_missing = True
     elif provider == "scaleway":
