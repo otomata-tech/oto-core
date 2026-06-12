@@ -1,0 +1,25 @@
+# Bytecode Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Packaging
+*.egg-info/
+build/
+dist/
+
+# Environnements
+.venv/
+venv/
+.env
+.env.local
+
+# Editor/IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS
+.DS_Store
+Thumbs.db
