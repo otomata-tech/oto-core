@@ -40,4 +40,4 @@ oto/                      # namespace (PAS d'__init__.py)
 ## Gotchas
 
 - **Namespace cross-package** : oto-core fournit `oto.tools`/`oto.config`, oto-cli fournit `oto.cli`/`oto.commands`. Les deux installés editable cohabitent dans le même `oto`. Changer le pyproject d'un des deux → **réinstaller editable** (le finder setuptools suit le pyproject).
-- Pas encore sur PyPI : oto-mcp/Dockerfile l'installe depuis git. Publier = build+twine (cf. meta-repo recette PyPI).
+- **Sur PyPI depuis 1.6.0** (2026-06-13, promesse ADR 0005). Release = bump version pyproject → build+twine depuis `git archive HEAD` (recette meta-repo ; hatch cassé sur cette machine). ⚠️ Les data files runtime (`sirene/data`, `pdf/templates`, `whatsapp/node/{package*.json,*.mjs}`) sont déclarés en `package-data` — tout nouveau fichier chargé via `Path(__file__)` doit y être ajouté, sinon la wheel casse. Les installs editable (box, oto-cli local) ne sont PAS affectés par un publish — `git pull` requis.
