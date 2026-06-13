@@ -33,6 +33,15 @@ Usage:
     # Push a variable payroll element (heures, prime…)
     client.ajouter_prime(numero_dossier="001", matricule_salarie="0001",
                          code="PRIME", montant=150.0)
+
+    # Redact sensitive fields before they reach the agent (mask IBANs,
+    # anonymize names) — see oto.tools.common.FieldFilter. Pass one in, or
+    # let from_config("silae") pick up a ~/.otomata/config.yaml policy:
+    from oto.tools.common import FieldFilter
+    client = SilaeClient(field_filter=FieldFilter(rules=[
+        {"fields": ["iban", "bic"], "action": "mask", "keep_last": 4},
+        {"fields": ["nom", "prenom"], "action": "anonymize"},
+    ]))
 """
 
 import time
@@ -40,7 +49,8 @@ from typing import Any, Optional
 
 import requests
 
-from ...config import require_secret, get_secret, get_cache_dir
+from ...config import require_secret, get_cache_dir
+from ..common import FieldFilter
 
 
 class SilaeClient:
@@ -60,6 +70,7 @@ class SilaeClient:
         client_secret: Optional[str] = None,
         subscription_key: Optional[str] = None,
         rate_limit_delay: float = 0.2,
+        field_filter: Optional[FieldFilter] = None,
     ):
         """
         Initialize the Silae client.
@@ -70,6 +81,9 @@ class SilaeClient:
             subscription_key: API configuration access key, sent as
                 Ocp-Apim-Subscription-Key (or SILAE_SUBSCRIPTION_KEY).
             rate_limit_delay: Delay between requests in batch helpers.
+            field_filter: Redacts sensitive fields (IBAN, names…) from every
+                response. Defaults to the `field_filters.silae` policy in
+                ~/.otomata/config.yaml (no-op when none is configured).
         """
         self.client_id = client_id or require_secret("SILAE_CLIENT_ID")
         self.client_secret = client_secret or require_secret("SILAE_CLIENT_SECRET")
@@ -77,6 +91,7 @@ class SilaeClient:
             "SILAE_SUBSCRIPTION_KEY"
         )
         self.rate_limit_delay = rate_limit_delay
+        self.field_filter = field_filter or FieldFilter.from_config("silae")
         self.session = requests.Session()
         self._token: Optional[str] = None
         self._token_expires_at: float = 0.0
@@ -209,9 +224,12 @@ class SilaeClient:
                 return {"ok": True}
 
             try:
-                return resp.json()
+                parsed = resp.json()
             except ValueError:
                 return {"ok": True, "raw": resp.text}
+
+            # Redact sensitive fields before the payload leaves the client.
+            return self.field_filter.apply(parsed)
 
         return {"error": "Max retries exceeded"}
 

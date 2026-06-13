@@ -86,6 +86,15 @@ def _get_oto_config() -> Dict[str, Any]:
     return _oto_config_cache
 
 
+def get_config_section(key: str, default: Any = None) -> Any:
+    """Read a named block from ~/.otomata/config.yaml.
+
+    Generic accessor for feature config that lives alongside `secret_provider`
+    / `search_provider` (e.g. `field_filters`). Returns `default` when absent.
+    """
+    return _get_oto_config().get(key, default)
+
+
 def get_provider() -> str:
     """Return configured secret provider ('sops', 'file', or 'scaleway').
 
