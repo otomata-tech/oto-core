@@ -7,13 +7,17 @@ from urllib.parse import urlparse, parse_qs
 import requests
 
 from ...config import require_secret
+from ..common import FieldFilter
 
 
 class FolkClient:
     BASE_URL = "https://api.folk.app/v1"
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: str = None, field_filter: Optional[FieldFilter] = None):
         self.api_key = api_key or require_secret("FOLK_API_KEY")
+        # Redacts sensitive fields (emails, names…) from every response.
+        # Defaults to the `field_filters.folk` policy in ~/.otomata/config.yaml.
+        self.field_filter = field_filter or FieldFilter.from_config("folk")
 
     def _request(self, method: str, endpoint: str, **kwargs) -> Any:
         url = f"{self.BASE_URL}/{endpoint}" if not endpoint.startswith("http") else endpoint
@@ -33,7 +37,7 @@ class FolkClient:
                     error_body = resp.text
                 raise Exception(f"HTTP {resp.status_code}: {error_body}")
             resp.raise_for_status()
-            return resp.json() if resp.content else {}
+            return self.field_filter.apply(resp.json()) if resp.content else {}
         raise Exception("Rate limit exceeded after retries")
 
     def _paginate(self, endpoint: str, params: Dict = None) -> List[Dict]:
