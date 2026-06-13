@@ -11,8 +11,9 @@ pip install "oto-core[stock]"     # + SIRENE stock queries (DuckDB/parquet)
 
 ## What's inside
 
-- `oto.tools.*` — one client per service: French company data (SIRENE, INPI, BODACC, BOAMP, DVF via [france-opendata](https://pypi.org/project/france-opendata/)), web search (Serper), email finding (Hunter), CRM (Attio, Folk), outreach (Lemlist, Kaspr, Fullenrich), Google Workspace, Slack, WhatsApp, Reddit, Pennylane, and more.
+- `oto.tools.*` — one client per service: French company data (SIRENE, INPI, BODACC, BOAMP, DVF via [france-opendata](https://pypi.org/project/france-opendata/)), web search (Serper), email finding (Hunter), CRM (Attio, Folk), outreach (Lemlist, Kaspr, Fullenrich), Google Workspace, Slack, WhatsApp, Reddit, Pennylane, Silae (French payroll), and more.
 - `oto.config` — three-tier secret resolution: environment variables → secret provider (SOPS/age, file, Scaleway Secret Manager) → defaults.
+- `oto.tools.common.FieldFilter` — reusable response redaction (mask IBANs, anonymize names, drop fields) any connector can apply; driven by code or a `field_filters.<service>` policy in `~/.otomata/config.yaml`.
 
 ## Ecosystem
 

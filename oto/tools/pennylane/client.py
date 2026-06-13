@@ -25,6 +25,7 @@ from typing import Optional
 import requests
 
 from ...config import require_secret
+from ..common import FieldFilter
 
 
 class PennylaneClient:
@@ -32,16 +33,21 @@ class PennylaneClient:
 
     BASE_URL = "https://app.pennylane.com/api/external/v2"
 
-    def __init__(self, api_key: str = None, rate_limit_delay: float = 0.3):
+    def __init__(self, api_key: str = None, rate_limit_delay: float = 0.3,
+                 field_filter: "FieldFilter" = None):
         """
         Initialize the Pennylane client.
 
         Args:
             api_key: Pennylane API bearer token (or set PENNYLANE_API_KEY env var)
             rate_limit_delay: Delay between requests (default 0.3s for 4 req/sec limit)
+            field_filter: Redacts sensitive fields (IBAN, names…) from every
+                response. Defaults to the `field_filters.pennylane` policy in
+                ~/.otomata/config.yaml (no-op when none is configured).
         """
         self.api_key = api_key or require_secret("PENNYLANE_API_KEY")
         self.rate_limit_delay = rate_limit_delay
+        self.field_filter = field_filter or FieldFilter.from_config("pennylane")
         self.session = requests.Session()
         self.session.headers.update({
             "Authorization": f"Bearer {self.api_key}",
@@ -71,7 +77,7 @@ class PennylaneClient:
                 if response.status_code == 204 or not response.content:
                     return {"ok": True}
 
-                return response.json()
+                return self.field_filter.apply(response.json())
             except Exception as e:
                 return {"error": str(e)}
 
@@ -97,7 +103,7 @@ class PennylaneClient:
                         "status_code": response.status_code,
                     }
 
-                return response.json()
+                return self.field_filter.apply(response.json())
             except Exception as e:
                 return {"error": str(e)}
 
@@ -126,7 +132,7 @@ class PennylaneClient:
                 if response.status_code == 204 or not response.content:
                     return {"ok": True}
 
-                return response.json()
+                return self.field_filter.apply(response.json())
             except Exception as e:
                 return {"error": str(e)}
 
@@ -162,7 +168,7 @@ class PennylaneClient:
                         "status_code": response.status_code,
                     }
 
-                return response.json()
+                return self.field_filter.apply(response.json())
             except Exception as e:
                 return {"error": str(e)}
 
