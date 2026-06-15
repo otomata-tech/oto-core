@@ -4,11 +4,25 @@ Kaspr API Client for LinkedIn profile enrichment.
 Requires: requests
 """
 
+import re
 from typing import Optional, Dict, Any, List
 
 import requests
 
 from ...config import require_secret
+
+# Kaspr veut le SLUG NU : une URL complète (ou un slash/query) fait un 500
+# (vérifié live : `alexislaporte` → 200, `https://.../in/alexislaporte/` → 500).
+_LINKEDIN_IN = re.compile(r"/in/([^/?#]+)", re.IGNORECASE)
+
+
+def linkedin_slug(raw: str) -> str:
+    """Normalise un identifiant LinkedIn (slug nu OU URL profil) → slug nu."""
+    raw = (raw or "").strip()
+    m = _LINKEDIN_IN.search(raw)
+    if m:
+        return m.group(1)
+    return raw.rstrip("/").split("?")[0].split("#")[0]
 
 
 class KasprClient:
@@ -75,7 +89,9 @@ class KasprClient:
         Enrich a LinkedIn profile.
 
         Args:
-            linkedin_id: LinkedIn profile ID (e.g., "john-doe-12345")
+            linkedin_id: LinkedIn slug ("john-doe-12345") or full profile URL
+                ("https://www.linkedin.com/in/john-doe-12345/") — the bare slug
+                is extracted automatically (a full URL makes Kaspr 500).
             name: Full name (helps matching)
             is_phone_required: Require phone number
             data_to_get: Data types to retrieve (e.g., ["workEmail", "personalEmail", "phone"])
@@ -83,7 +99,8 @@ class KasprClient:
         Returns:
             Enriched profile with emails and phones
         """
-        data = {"id": linkedin_id, "name": name or linkedin_id}
+        slug = linkedin_slug(linkedin_id)
+        data = {"id": slug, "name": name or slug}
         if is_phone_required:
             data["isPhoneRequired"] = True
         data["dataToGet"] = data_to_get or ["workEmail", "phone"]
