@@ -389,6 +389,52 @@ class PennylaneClient:
             body["external_reference"] = external_reference
         return self.post("customer_invoices", body)
 
+    def create_credit_note(self, customer_id: int, date: str, lines: list[dict],
+                           credited_invoice_id: int, external_reference: str = None,
+                           draft: bool = True, currency: str = "EUR") -> dict:
+        """Create a credit note (avoir) crediting an existing customer invoice.
+
+        A credit note is a `customer_invoice` linked to the original via
+        `credited_invoice` (the field is null on a normal invoice, points to the
+        credited invoice on an avoir — confirmed on API v2). `external_reference`
+        traces the source event (e.g. a GoCardless payment id `PMxxxx`) and lets a
+        caller stay idempotent (one failed payment → one avoir). Draft by default —
+        finalize separately once a human has validated.
+
+        lines: same shape as create_customer_invoice (product_id, quantity, and
+               optionally label, raw_currency_unit_price, unit, vat_rate).
+
+        # À CONFIRMER (compte sandbox) : nom/forme exacts du champ de liaison
+        (`credited_invoice` vs `credited_invoice_id`) et endpoint (POST sur
+        customer_invoices avec le flag, vs endpoint dédié). Implémenté ici comme le
+        flag documenté ; à ajuster au 1er test sandbox MM.
+        """
+        body = {
+            "customer_id": customer_id,
+            "date": date,
+            "draft": draft,
+            "currency": currency,
+            "credited_invoice_id": credited_invoice_id,
+            "invoice_lines": lines,
+        }
+        if external_reference:
+            body["external_reference"] = external_reference
+        return self.post("customer_invoices", body)
+
+    def find_invoice_by_external_reference(self, external_reference: str,
+                                           max_pages: int = 5) -> Optional[dict]:
+        """Return the customer invoice carrying this `external_reference`, or None.
+
+        Anti-duplicate guard for credit notes: before creating an avoir for a
+        GoCardless payment id, check none already references it. Scans
+        customer_invoices (bounded by max_pages) — no documented server-side
+        filter on external_reference on API v2 yet, so this is a client-side scan.
+        """
+        for inv in self.get_customer_invoices(max_pages=max_pages):
+            if isinstance(inv, dict) and inv.get("external_reference") == external_reference:
+                return inv
+        return None
+
     def update_invoice(self, invoice_id: int, **fields) -> dict:
         """Update a draft invoice. Accepts any field (customer_id, date, deadline, etc.)."""
         return self.put(f"customer_invoices/{invoice_id}", fields)
