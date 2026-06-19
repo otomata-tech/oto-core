@@ -134,10 +134,12 @@ class UnipileClient:
 
     # ---- facettes (employeur / localisation) -----------------------------
 
-    def resolve_facet(self, facet_type: str, keywords: str) -> list[dict]:
+    def resolve_facet(
+        self, facet_type: str, keywords: str, limit: int = 100
+    ) -> list[dict]:
         """Résout un nom en ids de facette LinkedIn.
 
-        facet_type ∈ COMPANY | LOCATION | INDUSTRY | SCHOOL ...
+        facet_type ∈ COMPANY | LOCATION | INDUSTRY | SCHOOL | SKILLS ...
         Retourne [{id, title}, ...]. La page company LinkedIn n'est pas
         forcément une facette employeur valide — utiliser CE résultat.
         """
@@ -145,6 +147,7 @@ class UnipileClient:
             "account_id": self.account_id(),
             "type": facet_type,
             "keywords": keywords,
+            "limit": limit,
         }
         data = self._request(
             "GET", "/linkedin/search/parameters", params=params
@@ -180,24 +183,64 @@ class UnipileClient:
         company: Optional[list[str]] = None,
         location: Optional[list[str]] = None,
         cursor: Optional[str] = None,
+        api: str = "classic",
+        network_distance: Optional[list[int]] = None,
+        url: Optional[str] = None,
+        advanced_keywords: Optional[dict] = None,
+        industry: Optional[dict] = None,
     ) -> dict:
-        """Recherche LinkedIn (classic). `company`/`location` acceptent des
+        """Recherche LinkedIn. `company`/`location`/`industry` acceptent des
         noms (résolus en facettes) ou des ids numériques.
+
+        Args:
+            keywords: mots-clés (nom, intitulé de poste…).
+            category: "people" ou "companies".
+            company: employeur(s) — noms ou ids de facette.
+            location: localisation(s) — noms ou ids de facette.
+            cursor: curseur de pagination.
+            api: "classic" | "sales_navigator" | "recruiter" (défaut classic).
+                Certains filtres (tenure, langue, role/skills) ne marchent que
+                sur sales_navigator/recruiter et dépendent de l'abonnement.
+            network_distance: degré(s) de relation — [1]=N1, [2]=N2, [3]=N3.
+            url: URL de recherche LinkedIn/Sales Nav collée du navigateur. Si
+                fournie, les autres filtres structurés sont ignorés.
+            advanced_keywords: recherche people ciblée — dict
+                {first_name?, last_name?, title?, company?, school?}.
+            industry: filtre secteur — dict {include?: [...], exclude?: [...]}
+                (noms ou ids de facette).
 
         Retourne le payload Unipile brut (items + paging + cursor).
         """
-        body: dict[str, Any] = {"api": "classic", "category": category}
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+
+        # Recherche par URL collée : mutuellement exclusive des filtres.
+        if url:
+            return self._request(
+                "POST", "/linkedin/search", params=params, json={"url": url}
+            )
+
+        body: dict[str, Any] = {"api": api, "category": category}
         if keywords:
             body["keywords"] = keywords
+        if advanced_keywords:
+            ak = {k: v for k, v in advanced_keywords.items() if v}
+            if ak:
+                body["advanced_keywords"] = ak
         company_ids = self._as_facet_ids("COMPANY", company)
         location_ids = self._as_facet_ids("LOCATION", location)
         if company_ids:
             body["company"] = company_ids
         if location_ids:
             body["location"] = location_ids
-        params = {"account_id": self.account_id()}
-        if cursor:
-            params["cursor"] = cursor
+        if industry:
+            inc = self._as_facet_ids("INDUSTRY", industry.get("include"))
+            exc = self._as_facet_ids("INDUSTRY", industry.get("exclude"))
+            if inc or exc:
+                body["industry"] = {"include": inc, "exclude": exc}
+        if network_distance:
+            body["network_distance"] = [int(d) for d in network_distance]
         return self._request(
             "POST", "/linkedin/search", params=params, json=body
         )
