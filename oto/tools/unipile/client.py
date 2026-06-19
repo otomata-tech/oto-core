@@ -323,3 +323,49 @@ class UnipileClient:
         if message:
             body["message"] = message
         return self._request("POST", "/users/invite", json=body)
+
+    # ---- posts / engagement (LinkedIn) ----------------------------------
+    # Lectures vérifiées en live ; POST = chemins inférés (convention REST + index
+    # Unipile), non sondés en dev pour ne pas publier sous l'identité du compte.
+
+    def list_member_posts(self, identifier: str, cursor: Optional[str] = None,
+                          limit: Optional[int] = None) -> dict:
+        """Posts publiés par un membre (`identifier` = provider id ou slug)."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request("GET", f"/users/{quote(identifier, safe='')}/posts", params=params)
+
+    def get_post(self, post_id: str) -> dict:
+        return self._request("GET", f"/posts/{quote(post_id, safe='')}",
+                             params={"account_id": self.account_id()})
+
+    def list_comments(self, post_id: str, cursor: Optional[str] = None) -> dict:
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        return self._request("GET", f"/posts/{quote(post_id, safe='')}/comments", params=params)
+
+    def list_reactions(self, post_id: str, cursor: Optional[str] = None) -> dict:
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        return self._request("GET", f"/posts/{quote(post_id, safe='')}/reactions", params=params)
+
+    def create_post(self, text: str) -> dict:
+        """Publie un post (chemin POST inféré)."""
+        return self._request("POST", "/posts",
+                             json={"account_id": self.account_id(), "text": text})
+
+    def comment_post(self, post_id: str, text: str) -> dict:
+        """Commente un post (chemin POST inféré)."""
+        return self._request("POST", f"/posts/{quote(post_id, safe='')}/comments",
+                             json={"account_id": self.account_id(), "text": text})
+
+    def react_post(self, post_id: str, value: str = "LIKE") -> dict:
+        """Réagit à un post (chemin POST inféré). value LIKE|PRAISE|EMPATHY|INTEREST|
+        APPRECIATION|ENTERTAINMENT."""
+        return self._request("POST", f"/posts/{quote(post_id, safe='')}/reactions",
+                             json={"account_id": self.account_id(), "value": value})
