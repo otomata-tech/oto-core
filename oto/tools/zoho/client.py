@@ -1,37 +1,48 @@
 """Zoho CRM API Client — https://www.zoho.com/crm/developer/docs/api/v7/"""
 
-import json
 import time
-from pathlib import Path
 from typing import Any, Optional
 
 import requests
 
-from ...config import require_secret, get_secret, get_cache_dir
+from ...config import require_secret, get_secret
 
 
 class ZohoClient:
     API_VERSION = "v7"
 
-    def __init__(self):
-        self.client_id = require_secret("ZOHO_CLIENT_ID")
-        self.client_secret = require_secret("ZOHO_CLIENT_SECRET")
-        self.refresh_token = require_secret("ZOHO_REFRESH_TOKEN")
-        self.api_domain = get_secret("ZOHO_API_DOMAIN", "https://www.zohoapis.com")
-        self.accounts_url = get_secret("ZOHO_ACCOUNTS_URL", "https://accounts.zoho.com")
-        self._token_path = get_cache_dir() / "zoho-access-token.json"
+    def __init__(
+        self,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+        api_domain: Optional[str] = None,
+        accounts_url: Optional[str] = None,
+    ):
+        """Initialise le client.
+
+        Les credentials peuvent être passés explicitement (usage serveur
+        multi-utilisateur : chaque appel construit un client avec les creds
+        résolus du user) ou résolus via `require_secret` (usage CLI). Le token
+        d'accès est mis en cache **en mémoire** sur l'instance — jamais sur un
+        fichier partagé (qui fuiterait entre utilisateurs côté serveur)."""
+        self.client_id = client_id or require_secret("ZOHO_CLIENT_ID")
+        self.client_secret = client_secret or require_secret("ZOHO_CLIENT_SECRET")
+        self.refresh_token = refresh_token or require_secret("ZOHO_REFRESH_TOKEN")
+        self.api_domain = api_domain or get_secret(
+            "ZOHO_API_DOMAIN", "https://www.zohoapis.com")
+        self.accounts_url = accounts_url or get_secret(
+            "ZOHO_ACCOUNTS_URL", "https://accounts.zoho.com")
+        self._access_token: Optional[str] = None
+        self._token_expires_at: float = 0.0
 
     # --- Auth ---
 
     def _get_access_token(self) -> str:
-        """Get a valid access token, refreshing if needed."""
-        # Try cached token
-        if self._token_path.exists():
-            data = json.loads(self._token_path.read_text())
-            if data.get("expires_at", 0) > time.time() + 60:
-                return data["access_token"]
+        """Get a valid access token, refreshing if needed (in-memory cache)."""
+        if self._access_token and self._token_expires_at > time.time() + 60:
+            return self._access_token
 
-        # Refresh
         resp = requests.post(
             f"{self.accounts_url}/oauth/v2/token",
             params={
@@ -47,18 +58,14 @@ class ZohoClient:
         if "error" in token_data:
             raise ValueError(f"Zoho OAuth error: {token_data['error']}")
 
-        # Cache with expiry
-        cache = {
-            "access_token": token_data["access_token"],
-            "expires_at": time.time() + token_data.get("expires_in", 3600),
-        }
-        self._token_path.parent.mkdir(parents=True, exist_ok=True)
-        self._token_path.write_text(json.dumps(cache))
-        return cache["access_token"]
+        self._access_token = token_data["access_token"]
+        self._token_expires_at = time.time() + token_data.get("expires_in", 3600)
+        return self._access_token
 
     def _invalidate_token(self):
-        """Remove cached token to force refresh on next request."""
-        self._token_path.unlink(missing_ok=True)
+        """Forget the cached token to force a refresh on next request."""
+        self._access_token = None
+        self._token_expires_at = 0.0
 
     # --- HTTP ---
 

@@ -15,11 +15,14 @@ from ....config import get_cache_dir
 class NotionClient:
     """Notion API client with automatic caching."""
 
-    def __init__(self, token: Optional[str] = None):
+    def __init__(self, token: Optional[str] = None, cache_enabled: bool = True):
         """Initialize Notion client.
 
         Args:
-            token: Notion integration token. If not provided, reads from .keys/notion-token.txt
+            token: Notion integration token. If not provided, reads from config.
+            cache_enabled: persist GET responses on disk. Disable on a shared
+                multi-user host: the cache key is the request, not the token,
+                so a cached file could leak another user's data.
         """
         self.base_url = "https://api.notion.com/v1"
         self.token = token or self._load_token()
@@ -30,8 +33,10 @@ class NotionClient:
         }
 
         # Setup cache directory
+        self.cache_enabled = cache_enabled
         self.cache_dir = get_cache_dir() / 'notion'
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if cache_enabled:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_ttl = 86400  # 24 hours
 
     def _load_token(self) -> str:
@@ -52,6 +57,8 @@ class NotionClient:
 
     def _get_cached(self, cache_key: str) -> Optional[Dict]:
         """Get cached response if valid."""
+        if not self.cache_enabled:
+            return None
         cache_file = self.cache_dir / f"{cache_key}.json"
 
         if not cache_file.exists():
@@ -71,6 +78,8 @@ class NotionClient:
 
     def _set_cache(self, cache_key: str, data: Dict):
         """Save response to cache."""
+        if not self.cache_enabled:
+            return
         cache_file = self.cache_dir / f"{cache_key}.json"
 
         try:

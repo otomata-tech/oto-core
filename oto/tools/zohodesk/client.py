@@ -15,34 +15,47 @@ Secrets expected in environment / ~/.otomata/secrets.env:
   ZOHO_DESK_ACCOUNTS_URL      (default https://accounts.zoho.com — must match the data center)
 """
 
-import json
 import time
 from typing import Any, Optional
 
 import requests
 
-from ...config import require_secret, get_secret, get_cache_dir
+from ...config import require_secret, get_secret
 
 
 class ZohoDeskClient:
     API_VERSION = "v1"
 
-    def __init__(self):
-        self.client_id = require_secret("ZOHO_DESK_CLIENT_ID")
-        self.client_secret = require_secret("ZOHO_DESK_CLIENT_SECRET")
-        self.refresh_token = require_secret("ZOHO_DESK_REFRESH_TOKEN")
-        self.org_id = require_secret("ZOHO_DESK_ORG_ID")
-        self.api_domain = get_secret("ZOHO_DESK_API_DOMAIN", "https://desk.zoho.com")
-        self.accounts_url = get_secret("ZOHO_DESK_ACCOUNTS_URL", "https://accounts.zoho.com")
-        self._token_path = get_cache_dir() / "zoho-desk-access-token.json"
+    def __init__(
+        self,
+        client_id: Optional[str] = None,
+        client_secret: Optional[str] = None,
+        refresh_token: Optional[str] = None,
+        org_id: Optional[str] = None,
+        api_domain: Optional[str] = None,
+        accounts_url: Optional[str] = None,
+    ):
+        """Initialise le client.
+
+        Credentials passés explicitement (serveur multi-user) ou résolus via
+        `require_secret` (CLI). Token d'accès caché **en mémoire** sur
+        l'instance — jamais sur un fichier partagé (fuite cross-user)."""
+        self.client_id = client_id or require_secret("ZOHO_DESK_CLIENT_ID")
+        self.client_secret = client_secret or require_secret("ZOHO_DESK_CLIENT_SECRET")
+        self.refresh_token = refresh_token or require_secret("ZOHO_DESK_REFRESH_TOKEN")
+        self.org_id = org_id or require_secret("ZOHO_DESK_ORG_ID")
+        self.api_domain = api_domain or get_secret(
+            "ZOHO_DESK_API_DOMAIN", "https://desk.zoho.com")
+        self.accounts_url = accounts_url or get_secret(
+            "ZOHO_DESK_ACCOUNTS_URL", "https://accounts.zoho.com")
+        self._access_token: Optional[str] = None
+        self._token_expires_at: float = 0.0
 
     # --- Auth ---
 
     def _get_access_token(self) -> str:
-        if self._token_path.exists():
-            data = json.loads(self._token_path.read_text())
-            if data.get("expires_at", 0) > time.time() + 60:
-                return data["access_token"]
+        if self._access_token and self._token_expires_at > time.time() + 60:
+            return self._access_token
 
         resp = requests.post(
             f"{self.accounts_url}/oauth/v2/token",
@@ -58,16 +71,13 @@ class ZohoDeskClient:
         if "error" in token_data:
             raise ValueError(f"Zoho Desk OAuth error: {token_data['error']}")
 
-        cache = {
-            "access_token": token_data["access_token"],
-            "expires_at": time.time() + token_data.get("expires_in", 3600),
-        }
-        self._token_path.parent.mkdir(parents=True, exist_ok=True)
-        self._token_path.write_text(json.dumps(cache))
-        return cache["access_token"]
+        self._access_token = token_data["access_token"]
+        self._token_expires_at = time.time() + token_data.get("expires_in", 3600)
+        return self._access_token
 
     def _invalidate_token(self):
-        self._token_path.unlink(missing_ok=True)
+        self._access_token = None
+        self._token_expires_at = 0.0
 
     # --- HTTP ---
 
