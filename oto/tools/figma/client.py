@@ -26,21 +26,27 @@ class FigmaClient:
 
     BASE_URL = "https://api.figma.com/v1"
 
-    def __init__(self, token: str = None, cache_ttl: int = 3600):
+    def __init__(self, token: str = None, cache_ttl: int = 3600,
+                 cache_enabled: bool = True):
         """
         Initialize Figma client.
 
         Args:
             token: Figma API token (or set FIGMA_API_KEY env var)
             cache_ttl: Cache TTL in seconds (default 1 hour)
+            cache_enabled: persist GET responses on disk. Disable on a shared
+                multi-user host: the cache key is the request, not the token,
+                so a cached file could leak another user's data.
         """
         self.token = token or require_secret("FIGMA_API_KEY")
         self.headers = {
             "X-Figma-Token": self.token,
             "Content-Type": "application/json"
         }
+        self.cache_enabled = cache_enabled
         self.cache_dir = get_cache_dir() / "figma"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        if cache_enabled:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.cache_ttl = cache_ttl
 
     def _cache_key(self, method: str, endpoint: str, params: Dict = None) -> str:
@@ -50,6 +56,8 @@ class FigmaClient:
 
     def _get_cached(self, cache_key: str) -> Optional[Dict]:
         """Get cached response."""
+        if not self.cache_enabled:
+            return None
         cache_file = self.cache_dir / f"{cache_key}.json"
         if not cache_file.exists():
             return None
@@ -63,6 +71,8 @@ class FigmaClient:
 
     def _set_cache(self, cache_key: str, data: Dict):
         """Set cache."""
+        if not self.cache_enabled:
+            return
         cache_file = self.cache_dir / f"{cache_key}.json"
         try:
             cache_file.write_text(json.dumps(data, indent=2, ensure_ascii=False))
