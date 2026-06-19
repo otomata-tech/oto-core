@@ -182,60 +182,51 @@ class PennylaneClient:
         per_page: int = 100
     ) -> list:
         """
-        Fetch all pages of a paginated endpoint.
-        Supports both page-based and cursor-based pagination.
+        Fetch all pages of a paginated endpoint (cursor pagination).
+
+        API Pennylane 2026 : seule la pagination par **curseur** (`cursor` + `limit`)
+        est supportée ; les anciens `page`/`per_page` renvoient HTTP 400. La réponse
+        porte `items`, `has_more` et `next_cursor` — on repasse `next_cursor` dans
+        `cursor` pour la page suivante. `max_pages` borne le nombre d'itérations,
+        `per_page` est envoyé comme `limit` (max 100).
         """
         all_data = []
         if params is None:
             params = {}
-        params['per_page'] = per_page
-        page = 1
+        params = dict(params)
+        params['limit'] = min(per_page, 100)
+        params.pop('page', None)
+        params.pop('per_page', None)
         cursor = None
+        pages = 0
 
         while True:
             if cursor:
                 params['cursor'] = cursor
-                params.pop('page', None)
-            else:
-                params['page'] = page
 
             data = self.fetch(endpoint, params)
             time.sleep(self.rate_limit_delay)
 
-            if 'error' in data:
+            if isinstance(data, dict) and 'error' in data:
                 break
 
-            # Handle different response formats
-            if 'items' in data:
+            if isinstance(data, dict) and 'items' in data:
                 items = data['items']
                 has_more = data.get('has_more', False)
                 next_cursor = data.get('next_cursor')
-                total_pages = data.get('total_pages', 1)
-            elif 'data' in data:
-                items = data['data']
-                has_more = False
-                next_cursor = None
-                total_pages = data.get('pagination', {}).get('total_pages', 1)
             else:
+                # endpoint non paginé (renvoie une liste ou un objet brut)
                 return data if isinstance(data, list) else [data]
 
-            if not items:
-                break
+            if items:
+                all_data.extend(items)
 
-            all_data.extend(items)
-
-            # Cursor-based pagination
-            if next_cursor and has_more:
-                cursor = next_cursor
-            elif has_more:
-                page += 1
-            elif page < total_pages:
-                page += 1
-            else:
+            pages += 1
+            if not has_more or not next_cursor:
                 break
-
-            if max_pages and page > max_pages:
+            if max_pages and pages >= max_pages:
                 break
+            cursor = next_cursor
 
         return all_data
 
