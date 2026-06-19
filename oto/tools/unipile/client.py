@@ -292,3 +292,34 @@ class UnipileClient:
             "text": text,
         }
         return self._request("POST", "/chats", json=body)
+
+    # ---- réseau / outreach (LinkedIn) -----------------------------------
+
+    def list_relations(self, cursor: Optional[str] = None,
+                       limit: Optional[int] = None) -> dict:
+        """Relations de 1er degré (N1) du compte connecté."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request("GET", "/users/relations", params=params)
+
+    def list_invitations(self, direction: str = "received") -> dict:
+        """Invitations de connexion — `direction` = 'received' (reçues) ou 'sent'."""
+        d = "sent" if direction == "sent" else "received"
+        return self._request(
+            "GET", f"/users/invite/{d}", params={"account_id": self.account_id()}
+        )
+
+    def send_invitation(self, provider_id: str,
+                        message: Optional[str] = None) -> dict:
+        """Envoie une demande de connexion LinkedIn à `provider_id` (+ note ≤300c).
+        `provider_id` = le champ `provider_id` d'un profil/résultat de recherche."""
+        body: dict[str, Any] = {
+            "account_id": self.account_id(),
+            "provider_id": provider_id,
+        }
+        if message:
+            body["message"] = message
+        return self._request("POST", "/users/invite", json=body)
