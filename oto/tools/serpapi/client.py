@@ -51,7 +51,8 @@ class SerpAPIClient:
 
     def search_jobs(
         self,
-        company: str,
+        query: str = None,
+        company: str = None,
         location: str = None,
         country: str = None,
         language: str = "en",
@@ -59,10 +60,13 @@ class SerpAPIClient:
         no_cache: bool = False,
     ) -> Dict[str, Any]:
         """
-        Search Google Jobs for company job postings.
+        Search Google Jobs.
 
         Args:
-            company: Company name
+            query: free-text job query (e.g. 'data engineer Paris', 'senior
+                python remote'). Use this for general job sourcing.
+            company: convenience shortcut — if `query` is omitted, searches
+                "<company> jobs" (backward-compatible).
             location: Geographic location (e.g., 'Paris, France')
             country: Country code (e.g., 'fr', 'us')
             language: Language code
@@ -72,11 +76,13 @@ class SerpAPIClient:
         Returns:
             Dict with jobs_results array
         """
-        query = f"{company} jobs"
+        q = query or (f"{company} jobs" if company else None)
+        if not q:
+            raise ValueError("search_jobs requires `query` or `company`")
 
         params = {
             "engine": "google_jobs",
-            "q": query,
+            "q": q,
             "hl": language,
             "no_cache": str(no_cache).lower()
         }
