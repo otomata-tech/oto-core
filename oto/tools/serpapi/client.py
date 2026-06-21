@@ -14,9 +14,11 @@ from ...config import require_secret
 
 class SerpAPIClient:
     """
-    SerpAPI client for:
-    - Google Jobs search
-    - Job details retrieval
+    SerpAPI client — accès générique à **tous** les moteurs SerpApi.
+
+    `search(engine, params)` est l'entrée générique (engine = 'google', 'bing',
+    'google_trends', 'youtube', 'walmart', 'google_jobs'…). `search_jobs` /
+    `get_job_details` sont des raccourcis typés Google Jobs construits par-dessus.
     """
 
     BASE_URL = "https://serpapi.com/search"
@@ -49,6 +51,70 @@ class SerpAPIClient:
         response.raise_for_status()
         return response.json()
 
+    def _paginate(
+        self,
+        params: Dict,
+        result: Dict,
+        results_key: str,
+        max_results: int,
+    ) -> Dict:
+        """Suit `serpapi_pagination.next_page_token` jusqu'à `max_results`.
+
+        Concatène `result[results_key]` au fil des pages et tronque à
+        `max_results`. Mute et renvoie `result` (la dernière page sert de
+        métadonnées). No-op si le moteur ne renvoie pas de token.
+        """
+        all_items = list(result.get(results_key, []))
+        while len(all_items) < max_results:
+            next_token = result.get("serpapi_pagination", {}).get("next_page_token")
+            if not next_token:
+                break
+            params["next_page_token"] = next_token
+            result = self._request(params)
+            new_items = result.get(results_key, [])
+            if not new_items:
+                break
+            all_items.extend(new_items)
+
+        result[results_key] = all_items[:max_results]
+        return result
+
+    def search(
+        self,
+        engine: str,
+        params: Dict[str, Any] = None,
+        max_results: int = None,
+        results_key: str = None,
+        **extra,
+    ) -> Dict[str, Any]:
+        """
+        Generic SerpApi call — reach ANY engine.
+
+        Args:
+            engine: SerpApi engine id, e.g. 'google', 'bing', 'duckduckgo',
+                'youtube', 'walmart', 'amazon', 'ebay', 'google_trends',
+                'google_finance', 'google_flights', 'google_hotels',
+                'google_events', 'google_jobs'… (full list: serpapi.com).
+            params: engine-specific parameters (e.g. {'q': 'pizza', 'gl': 'us'}).
+            max_results: if set with `results_key`, auto-paginate up to this many.
+            results_key: the result array to paginate/cap (e.g. 'organic_results',
+                'jobs_results'). Required to enable pagination.
+            **extra: extra params merged into the query (convenience).
+
+        Returns:
+            Raw SerpApi JSON payload.
+        """
+        payload: Dict[str, Any] = {"engine": engine}
+        if params:
+            payload.update(params)
+        if extra:
+            payload.update(extra)
+
+        result = self._request(payload)
+        if max_results and results_key:
+            result = self._paginate(payload, result, results_key, max_results)
+        return result
+
     def search_jobs(
         self,
         query: str = None,
@@ -80,42 +146,16 @@ class SerpAPIClient:
         if not q:
             raise ValueError("search_jobs requires `query` or `company`")
 
-        params = {
-            "engine": "google_jobs",
-            "q": q,
-            "hl": language,
-            "no_cache": str(no_cache).lower()
-        }
-
+        params: Dict[str, Any] = {"q": q, "hl": language, "no_cache": str(no_cache).lower()}
         if location:
             params["location"] = location
         if country:
             params["gl"] = country
 
-        result = self._request(params)
-        all_jobs = result.get("jobs_results", [])
-
-        # Handle pagination
-        page = 2
-        while len(all_jobs) < max_results:
-            pagination = result.get("serpapi_pagination", {})
-            next_token = pagination.get("next_page_token")
-
-            if not next_token:
-                break
-
-            params["next_page_token"] = next_token
-            result = self._request(params)
-
-            new_jobs = result.get("jobs_results", [])
-            if not new_jobs:
-                break
-
-            all_jobs.extend(new_jobs)
-            page += 1
-
-        result["jobs_results"] = all_jobs[:max_results]
-        return result
+        return self.search(
+            "google_jobs", params=params,
+            max_results=max_results, results_key="jobs_results",
+        )
 
     def get_job_details(self, job_id: str) -> Dict[str, Any]:
         """
@@ -127,8 +167,4 @@ class SerpAPIClient:
         Returns:
             Detailed job information
         """
-        params = {
-            "engine": "google_jobs_listing",
-            "q": job_id
-        }
-        return self._request(params)
+        return self.search("google_jobs_listing", params={"q": job_id})
