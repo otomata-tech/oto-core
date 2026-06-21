@@ -465,6 +465,261 @@ class UnipileClient:
             return resp
         return parse_feed(resp, count=count, start=start)
 
+    # ---- réseau : invitations (handle / cancel) -------------------------
+
+    def handle_invitation(
+        self, invitation_id: str, shared_secret: str, action: str = "accept"
+    ) -> dict:
+        """Accepte ou refuse une invitation LinkedIn REÇUE.
+
+        Args:
+            invitation_id: id de l'invitation (champ d'un item `list_invitations
+                ('received')`).
+            shared_secret: token fourni par LinkedIn sur le même item
+                (obligatoire côté API pour traiter une invitation reçue).
+            action: 'accept' ou 'decline'.
+        """
+        if action not in ("accept", "decline"):
+            raise UnipileError("handle_invitation : action = 'accept' ou 'decline'.")
+        body = {
+            "provider": "LINKEDIN",
+            "account_id": self.account_id(),
+            "shared_secret": shared_secret,
+            "action": action,
+        }
+        return self._request(
+            "POST", f"/users/invite/received/{quote(invitation_id, safe='')}", json=body
+        )
+
+    def cancel_invitation(self, invitation_id: str) -> dict:
+        """Annule une invitation LinkedIn ENVOYÉE (en attente). `invitation_id` =
+        id d'un item `list_invitations('sent')`."""
+        return self._request(
+            "DELETE", f"/users/invite/sent/{quote(invitation_id, safe='')}",
+            params={"account_id": self.account_id()},
+        )
+
+    # ---- réseau : followers / following / activité d'un membre ----------
+
+    def get_own_profile(self) -> dict:
+        """Profil du compte connecté lui-même (le « moi » LinkedIn)."""
+        return self._request("GET", "/users/me",
+                             params={"account_id": self.account_id()})
+
+    def list_followers(self, user_id: Optional[str] = None,
+                      cursor: Optional[str] = None,
+                      limit: Optional[int] = None) -> dict:
+        """Followers (LinkedIn : du compte connecté ; `user_id` = autre membre
+        selon le provider). Paginé."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if user_id:
+            params["user_id"] = user_id
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request("GET", "/users/followers", params=params)
+
+    def list_following(self, user_id: Optional[str] = None,
+                      cursor: Optional[str] = None,
+                      limit: Optional[int] = None) -> dict:
+        """Comptes suivis. Paginé."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if user_id:
+            params["user_id"] = user_id
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request("GET", "/users/following", params=params)
+
+    def list_member_comments(self, identifier: str,
+                            cursor: Optional[str] = None,
+                            limit: Optional[int] = None) -> dict:
+        """Commentaires laissés par un membre (`identifier` = provider id). Pour
+        repérer ce qu'un prospect engage → accroche social-selling."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request(
+            "GET", f"/users/{quote(identifier, safe='')}/comments", params=params
+        )
+
+    def list_member_reactions(self, identifier: str,
+                             cursor: Optional[str] = None,
+                             limit: Optional[int] = None) -> dict:
+        """Réactions d'un membre (`identifier` = provider id) — posts qu'il a likés."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request(
+            "GET", f"/users/{quote(identifier, safe='')}/reactions", params=params
+        )
+
+    # ---- messagerie : participants / contacts / état du fil -------------
+
+    def list_chat_attendees(self, chat_id: str) -> dict:
+        """Participants d'un fil de messagerie (`chat_id` d'un `list_chats`)."""
+        return self._request(
+            "GET", f"/chats/{quote(chat_id, safe='')}/attendees",
+            params={"account_id": self.account_id()},
+        )
+
+    def list_attendees(self, cursor: Optional[str] = None,
+                      limit: Optional[int] = None) -> dict:
+        """Carnet de contacts de messagerie (tous les interlocuteurs). Paginé."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request("GET", "/attendees", params=params)
+
+    def patch_chat(self, chat_id: str, action: str, value: Any = None) -> dict:
+        """Modifie l'état d'un fil. `action` ∈ setReadStatus | setMuteStatus |
+        setArchiveStatus | setPinnedStatus | addParticipant | removeParticipant |
+        setLabel | getInviteLink. `value` = booléen (statuts) ou string
+        (participant/label) ; omis pour getInviteLink."""
+        body: dict[str, Any] = {"action": action}
+        if value is not None:
+            body["value"] = value
+        return self._request(
+            "PATCH", f"/chats/{quote(chat_id, safe='')}", json=body
+        )
+
+    def react_message(self, message_id: str, reaction: str) -> dict:
+        """Réagit à un message (DM) avec un emoji natif (ex. '👍'). `message_id` =
+        id d'un message de `list_messages`."""
+        return self._request(
+            "POST", f"/messages/{quote(message_id, safe='')}/reaction",
+            json={"reaction": reaction},
+        )
+
+    # ---- LinkedIn recruiter / sales navigator ---------------------------
+    # Nécessitent un abonnement Recruiter / Sales Navigator sur le compte
+    # connecté ; sinon l'API Unipile renvoie une erreur (remontée telle quelle).
+
+    def list_contracts(self) -> dict:
+        """Contrats LinkedIn premium disponibles (Recruiter / Sales Navigator) du
+        compte — id à passer à `select_contract` pour activer la bonne ardoise."""
+        return self._request("GET", "/linkedin/contracts",
+                             params={"account_id": self.account_id()})
+
+    def select_contract(self, contract_id: str) -> dict:
+        """Active un contrat Recruiter / Sales Navigator (`contract_id` de
+        `list_contracts`) pour les appels premium qui suivent."""
+        return self._request(
+            "POST", f"/linkedin/contracts/{quote(contract_id, safe='')}/select",
+            params={"account_id": self.account_id()},
+        )
+
+    def inmail_balance(self) -> dict:
+        """Solde de crédits InMail (messages premium) du compte connecté."""
+        return self._request("GET", "/linkedin/inmail/balance",
+                             params={"account_id": self.account_id()})
+
+    def endorse_profile(self, profile_id: str, skill_endorsement_id: int) -> dict:
+        """Recommande une compétence d'un membre.
+
+        Args:
+            profile_id: provider id du membre (commence par ACo/ADo).
+            skill_endorsement_id: `endorsement_id` d'une compétence, renvoyé dans le
+                profil (`get_profile`).
+        """
+        return self._request("POST", "/linkedin/profile/endorse", json={
+            "account_id": self.account_id(),
+            "profile_id": profile_id,
+            "skill_endorsement_id": skill_endorsement_id,
+        })
+
+    def member_action(self, user_id: str, api: str, action: str,
+                     hiring_project_id: Optional[str] = None,
+                     stage: Optional[str] = None,
+                     list_id: Optional[str] = None) -> dict:
+        """Action premium sur un membre (sauvegarde lead / pipeline recruteur).
+
+        Args:
+            user_id: provider id du membre.
+            api: 'sales_navigator' ou 'recruiter'.
+            action: sales_navigator → 'saveLead' ; recruiter →
+                'addCandidateToPipeline' | 'addApplicantToPipeline' |
+                'changeCandidatePipeline' | 'rejectApplicant'.
+            hiring_project_id: requis pour les actions pipeline recruiter.
+            stage: pipeline recruiter — 'UNCONTACTED' | 'CONTACTED' | 'REPLIED'.
+            list_id: liste Sales Navigator cible (optionnel pour saveLead).
+        """
+        body: dict[str, Any] = {
+            "account_id": self.account_id(),
+            "api": api,
+            "action": action,
+        }
+        if hiring_project_id:
+            body["hiring_project_id"] = hiring_project_id
+        if stage:
+            body["stage"] = stage
+        if list_id:
+            body["list_id"] = list_id
+        return self._request(
+            "POST", f"/linkedin/user/{quote(user_id, safe='')}", json=body
+        )
+
+    # ---- LinkedIn recruiter : offres d'emploi & candidats (lectures) ----
+    # Chemins REST de l'inventaire Unipile (best-effort, gatés Recruiter).
+
+    def list_job_postings(self, cursor: Optional[str] = None,
+                         limit: Optional[int] = None) -> dict:
+        """Offres d'emploi (job postings) du compte recruteur. Paginé."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request("GET", "/linkedin/job-postings", params=params)
+
+    def get_job_posting(self, job_id: str) -> dict:
+        """Détail d'une offre d'emploi (`job_id` de `list_job_postings`)."""
+        return self._request(
+            "GET", f"/linkedin/job-postings/{quote(job_id, safe='')}",
+            params={"account_id": self.account_id()},
+        )
+
+    def list_job_applicants(self, job_id: str, cursor: Optional[str] = None,
+                           limit: Optional[int] = None) -> dict:
+        """Candidats d'une offre d'emploi. Paginé."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request(
+            "GET", f"/linkedin/job-postings/{quote(job_id, safe='')}/applicants",
+            params=params,
+        )
+
+    def get_job_applicant(self, job_id: str, applicant_id: str) -> dict:
+        """Détail d'un candidat d'une offre."""
+        return self._request(
+            "GET",
+            f"/linkedin/job-postings/{quote(job_id, safe='')}"
+            f"/applicants/{quote(applicant_id, safe='')}",
+            params={"account_id": self.account_id()},
+        )
+
+    def list_hiring_projects(self, cursor: Optional[str] = None,
+                            limit: Optional[int] = None) -> dict:
+        """Projets de recrutement (hiring projects) du compte Recruiter. Paginé.
+        Le `hiring_project_id` alimente `member_action` (pipeline)."""
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if cursor:
+            params["cursor"] = cursor
+        if limit:
+            params["limit"] = limit
+        return self._request("GET", "/linkedin/hiring-projects", params=params)
+
 
 # ---- feed parsing (Voyager graphe normalisé) ----------------------------
 # Voyager renvoie un graphe NORMALISÉ : `data.feedDashMainFeedByMainFeed.elements[]`
