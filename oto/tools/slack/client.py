@@ -13,6 +13,41 @@ import requests
 from ...config import require_secret, get_secret
 
 
+# Slack répond HTTP 200 avec `{"ok": false, "error": "<code>"}` pour les rejets
+# logiques (raise_for_status ne les voit pas). On les traduit en erreur amont
+# TYPÉE portant `.status` (même contrat que les autres connecteurs oto-core, ex.
+# NinjaError) : un code de rejet client (channel introuvable, droits, scope…) est
+# un 4xx amont — pas un bug backend — donc trié comme tel en aval (calllog,
+# Sentry). Les vrais incidents Slack (internal_error…) restent en 5xx → reportés.
+_SLACK_ERROR_STATUS = {
+    # 401 — authentification
+    "not_authed": 401, "invalid_auth": 401, "account_inactive": 401,
+    "token_revoked": 401, "token_expired": 401,
+    # 403 — autorisation / périmètre
+    "missing_scope": 403, "not_allowed_token_type": 403, "ekm_access_denied": 403,
+    "not_in_channel": 403, "is_archived": 403, "restricted_action": 403,
+    "cant_post_message": 403, "no_permission": 403,
+    # 404 — cible absente
+    "channel_not_found": 404, "user_not_found": 404, "users_not_found": 404,
+    "message_not_found": 404, "thread_not_found": 404, "file_not_found": 404,
+    # 429 — quota
+    "ratelimited": 429, "rate_limited": 429,
+    # 5xx — incident côté Slack (à reporter, vrai bug amont)
+    "internal_error": 502, "fatal_error": 502, "service_unavailable": 503,
+    "request_timeout": 504,
+}
+
+
+class SlackError(RuntimeError):
+    """Erreur API Slack (`ok:false`). `status` = équivalent HTTP du code Slack
+    (défaut 400 = rejet client), `error` = le code Slack brut."""
+
+    def __init__(self, error: Optional[str], status: Optional[int] = None):
+        self.error = error or "unknown"
+        self.status = status if status is not None else _SLACK_ERROR_STATUS.get(self.error, 400)
+        super().__init__(f"Slack API error: {self.error}")
+
+
 def verify_slack_signature(
     signing_secret: str,
     body: bytes,
@@ -139,7 +174,7 @@ class SlackClient:
 
         data = response.json()
         if not data.get("ok"):
-            raise Exception(f"Slack API error: {data.get('error')}")
+            raise SlackError(data.get("error"))
 
         return data
 
