@@ -83,6 +83,7 @@ class FolkClient:
                       emails: List[str] = None, phones: List[str] = None,
                       job_title: str = None, company_name: str = None,
                       company_id: str = None, group_ids: List[str] = None,
+                      urls: List[str] = None, description: str = None,
                       **kwargs) -> Dict:
         body: Dict[str, Any] = {"firstName": first_name}
         if last_name:
@@ -91,6 +92,10 @@ class FolkClient:
             body["emails"] = emails
         if phones:
             body["phones"] = phones
+        if urls:
+            body["urls"] = urls
+        if description:
+            body["description"] = description
         if job_title:
             body["jobTitle"] = job_title
         companies = []
