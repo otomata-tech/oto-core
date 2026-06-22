@@ -430,9 +430,17 @@ class UnipileClient:
         count: int = 20,
         cursor: Optional[str] = None,
         raw: bool = False,
+        sort_order: str = "MEMBER_SETTING",
     ) -> dict:
-        """Feed d'accueil LinkedIn (flux chronologique de la page d'accueil) du
-        compte connecté, via la Magic Route raw data → Voyager (cf. FEED_QUERY_ID).
+        """Feed d'accueil LinkedIn (la page d'accueil) du compte connecté, via la
+        Magic Route raw data → Voyager (cf. FEED_QUERY_ID).
+
+        ⚠️ L'ordre n'est PAS un chrono garanti : `sort_order=MEMBER_SETTING`
+        (défaut) **respecte le réglage de tri choisi sur ta home LinkedIn** (« Les
+        plus pertinents » / « Plus récents »). Pour un miroir chronologique, règle
+        ta home LinkedIn sur « Plus récents ». Quel que soit l'ordre de service,
+        chaque post porte `posted_at` (décodé de l'id d'activité) → l'appelant peut
+        toujours re-trier de façon stable. Les encarts sponsorisés/promo sont exclus.
 
         Args:
             count: nombre d'items voulus (le feed Voyager pagine par lots ;
@@ -440,15 +448,18 @@ class UnipileClient:
             cursor: curseur opaque renvoyé par un appel précédent
                 (`"<start>|<paginationToken>"`) pour la page suivante. None = 1re page.
             raw: True → renvoie l'enveloppe Unipile brute sans mapping (debug).
+            sort_order: valeur de tri Voyager pour les pages paginées
+                (`MEMBER_SETTING` par défaut). N'affecte que les pages suivantes :
+                la 1re page suit toujours le tri par défaut de la home.
 
         Retourne `{items: [...], cursor: str|None, count: int}` où chaque item est
-        normalisé par `parse_feed` (parsing défensif — voir ce module).
+        normalisé par `parse_feed` (posts organiques seulement).
         """
         start, token = _unpack_cursor(cursor)
         if token:
             variables = (
                 f"(start:{start},count:{count},"
-                f"paginationToken:{token},sortOrder:MEMBER_SETTING)"
+                f"paginationToken:{token},sortOrder:{sort_order})"
             )
             request_url = (
                 "https://www.linkedin.com/voyager/api/graphql"
@@ -873,13 +884,32 @@ def _map_feed_item(el: dict, included_by_urn: dict) -> dict:
     }
 
 
+def _is_promo(el: dict) -> bool:
+    """True si l'update est un encart sponsorisé/promotionnel (pub LinkedIn,
+    « Hiring Pro », posts Promoted…) plutôt qu'un post organique — à exclure du
+    feed. Plusieurs repères Voyager, best-effort : urn `inAppPromotion`, un
+    `promoComponent` dans le contenu, `actionsPosition=PROMO_COMPONENT`, ou un
+    bloc `sponsoredTracking` dans les métadonnées de tracking."""
+    eu = el.get("entityUrn")
+    if isinstance(eu, str) and "inAppPromotion" in eu:
+        return True
+    if _deep_get(el, "content", "promoComponent") is not None:
+        return True
+    if _deep_get(el, "metadata", "actionsPosition") == "PROMO_COMPONENT":
+        return True
+    if _deep_get(el, "metadata", "trackingData", "sponsoredTracking") is not None:
+        return True
+    return False
+
+
 def parse_feed(resp: Any, count: int = 20, start: int = 0) -> dict:
     """Mappe l'enveloppe Unipile raw data du feed → `{items, cursor, count}`.
 
-    Parsing DÉFENSIF : par item, try/except → un update qui casse est renvoyé en
-    `{_unmapped: True, _raw: el}` et journalisé (warning) plutôt que de faire
-    échouer toute la page. Si la structure globale est inattendue (pas d'`elements`),
-    on remonte `{items: [], cursor: None, count: 0, _raw: resp}` + log error.
+    Ne renvoie QUE des posts organiques normalisés : les encarts sponsorisés/promo
+    (`_is_promo`) sont écartés silencieusement, et un update au schéma inattendu est
+    **journalisé (warning) puis ignoré** (jamais de `_raw` verbeux dans la sortie).
+    Si la structure globale est inattendue (pas d'`elements`), on remonte
+    `{items: [], cursor: None, count: 0, _raw: resp}` + log error.
     """
     # Enveloppe Unipile {object, data} → JSON Voyager {data, included}.
     voyager = resp.get("data") if isinstance(resp, dict) else None
@@ -900,16 +930,15 @@ def parse_feed(resp: Any, count: int = 20, start: int = 0) -> dict:
 
     items: list[dict] = []
     for el in elements:
-        if not isinstance(el, dict):
-            continue
+        if not isinstance(el, dict) or _is_promo(el):
+            continue  # non-dict ou encart sponsorisé/promo → jamais renvoyé
         try:
             items.append(_map_feed_item(el, included_by_urn))
         except Exception:  # noqa: BLE001 — parsing défensif voulu
             logger.warning(
-                "unipile feed: mapping d'un item échoué, renvoyé en brut",
-                exc_info=True,
+                "unipile feed: mapping d'un item échoué, ignoré", exc_info=True
             )
-            items.append({"_unmapped": True, "_raw": el})
+            continue
 
     items = items[:count]
     token = _deep_get(feed, "metadata", "paginationToken")

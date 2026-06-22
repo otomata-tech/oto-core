@@ -82,12 +82,31 @@ def test_no_token_means_no_cursor():
     assert parse_feed(resp, count=20)["cursor"] is None
 
 
-def test_broken_item_is_kept_as_raw_not_fatal():
+def test_broken_item_is_dropped_not_fatal():
     resp = _envelope([{"garbage": True}, "not-a-dict", _update()])
     out = parse_feed(resp, count=20)
-    # le dict cassé → _unmapped ; la string est ignorée ; l'update valide passe
-    assert any(i.get("_unmapped") for i in out["items"])
-    assert any(i.get("author_name") == "Jane Doe" for i in out["items"])
+    # dict cassé + string → journalisés puis ignorés (plus de _raw verbeux) ;
+    # l'update valide passe. Sortie propre = uniquement des posts mappés.
+    assert all(not i.get("_unmapped") for i in out["items"])
+    assert out["count"] == 1
+    assert out["items"][0]["author_name"] == "Jane Doe"
+
+
+def test_sponsored_and_promo_items_are_excluded():
+    promo_inapp = {
+        "entityUrn": "urn:li:fsd_update:(urn:li:inAppPromotion:20815,MAIN_FEED)",
+        "content": {"promoComponent": {"title": {"text": "Hiring Pro"}}},
+        "metadata": {"actionsPosition": "PROMO_COMPONENT"},
+    }
+    sponsored = {
+        "entityUrn": "urn:li:fsd_update:(urn:li:activity:999,MAIN_FEED)",
+        "actor": {"name": {"text": "BrandCo"}},
+        "commentary": {"text": "ad"},
+        "metadata": {"trackingData": {"sponsoredTracking": {"activityType": "SPONSORED"}}},
+    }
+    out = parse_feed(_envelope([promo_inapp, sponsored, _update()]), count=20)
+    assert out["count"] == 1  # seul le post organique survit
+    assert out["items"][0]["author_name"] == "Jane Doe"
 
 
 def test_unexpected_structure_returns_raw():
