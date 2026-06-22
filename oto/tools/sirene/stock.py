@@ -7,8 +7,8 @@ Auth : token long-lived stocké dans le secret `OTO_API_KEY` (issu depuis
 `app.oto.ninja/account` → "tokens cli"). Override URL : `OTO_API_URL`.
 
 Use cases couverts :
-- `get_headquarters_addresses(sirens)` — batch enrichissement (1 call HTTP par siren ;
-  pour de très gros batches, paralléliser côté caller).
+- `get_headquarters_addresses(sirens)` — batch enrichissement (1 call HTTP → 1 scan
+  serveur pour toute la liste, via POST /api/sirene/headquarters).
 - `get_all_establishments(siren)` — tous les établissements d'une boîte.
 - `lookup_siret(siret)` — fetch précis par SIRET.
 - `search(...)` — recherche multi-critères (NAF, commune, CP, enseigne, denomination).
@@ -71,6 +71,18 @@ class SireneStock:
             raise SireneStockError(r.status_code, detail)
         return r.json()
 
+    def _post(self, path: str, payload: dict) -> Any:
+        # timeout large : un scan batch côté serveur (parquet distant) peut durer
+        # quelques dizaines de secondes pour une grosse liste.
+        r = self.session.post(f"{self.base_url}{path}", json=payload, timeout=180)
+        if r.status_code >= 400:
+            try:
+                detail = r.json()
+            except Exception:
+                detail = r.text
+            raise SireneStockError(r.status_code, detail)
+        return r.json()
+
     # --- normalisation --------------------------------------------------------
 
     @staticmethod
@@ -109,16 +121,17 @@ class SireneStock:
     def get_headquarters_addresses(self, sirens: List[str]) -> Dict[str, Dict[str, Any]]:
         """Headquarters address for each SIREN. Returns {siren: {street, postal_code, city, status, ...}}.
 
-        Pour les SIRENs introuvables : absents du dict (ni siege ni siret côté serveur).
+        Vrai batch : UN appel HTTP → UN scan parquet côté serveur pour toute la
+        liste (vs un appel par SIREN). Indispensable sur parquet distant. Les
+        adresses renvoyées par /headquarters sont déjà normalisées côté serveur.
+
+        Pour les SIRENs introuvables : absents du dict (pas de siège côté serveur).
         """
-        out: Dict[str, Dict[str, Any]] = {}
-        for siren in sirens:
-            siren = str(siren)
-            data = self._get("/api/sirene/siege", params={"siren": siren})
-            siege = data.get("siege")
-            if siege:
-                out[siren] = self._normalize(siege)
-        return out
+        clean = [str(s) for s in sirens]
+        if not clean:
+            return {}
+        data = self._post("/api/sirene/headquarters", {"sirens": clean})
+        return data.get("headquarters", {})
 
     def get_all_establishments(self, siren: str, active_only: bool = True) -> List[Dict[str, Any]]:
         """Tous les établissements d'un SIREN (siège + secondaires)."""
