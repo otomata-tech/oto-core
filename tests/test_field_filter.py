@@ -123,3 +123,27 @@ def test_pseudonym_without_faker_raises_clear_error(monkeypatch):
     f = FieldFilter(rules=[{"fields": ["x"], "action": "pseudonym"}])
     with pytest.raises(RuntimeError, match="oto-core\\[anonymize\\]"):
         f.apply({"x": "Jean"})
+
+
+def test_mask_applies_to_scalar_list_elements():
+    # liste de scalaires sous une clé matchée → chaque élément masqué (pas juste recursé).
+    f = FieldFilter(rules=[{"fields": ["emails"], "action": "mask", "preserve": "email"}])
+    out = f.apply({"contact": {"emails": ["a@b.com", "c@d.com"]}})
+    masked = out["contact"]["emails"]
+    assert all("@" in m and m != orig for m, orig in zip(masked, ["a@b.com", "c@d.com"]))
+
+
+def test_mask_applies_to_mixed_shape_list():
+    # liste MIXTE (scalaire + dict) → le scalaire est masqué, le dict recursé.
+    f = FieldFilter(rules=[{"fields": ["emails"], "action": "mask", "preserve": "email"}])
+    out = f.apply({"emails": ["a@b.com", {"value": "c@d.com", "label": "primary"}]})
+    assert out["emails"][0] != "a@b.com" and "@" in out["emails"][0]
+    # le dict imbriqué est recursé : pas de clé `emails` dedans → inchangé, pas de crash.
+    assert out["emails"][1]["label"] == "primary"
+
+
+def test_drop_on_scalar_list_drops_each_via_recursion():
+    # `drop` sur une liste de dicts retire la clé ciblée dans chaque dict.
+    f = FieldFilter(rules=[{"fields": ["secret"], "action": "drop"}])
+    out = f.apply({"items": [{"secret": "x", "ok": 1}, {"secret": "y", "ok": 2}]})
+    assert out["items"] == [{"ok": 1}, {"ok": 2}]
