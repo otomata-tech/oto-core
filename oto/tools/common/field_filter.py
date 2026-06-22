@@ -131,10 +131,17 @@ class FieldFilter:
     def _transform(self, value: Any, rule: dict, action: str) -> Any:
         """Apply a non-drop action to a single matched value.
 
-        Containers are still recursed so a matched key holding a dict/list gets
-        its nested fields redacted rather than blindly stringified.
+        A matched key holding a **list of scalars** (e.g. ``emails: ["a@b.com"]``,
+        ``phones: [...]``) gets the action applied **element-wise** — otherwise the
+        values would leak (recursing a scalar list matches no key). A dict or a list
+        of containers is recursed so nested fields are redacted rather than blindly
+        stringified.
         """
-        if isinstance(value, (dict, list)):
+        if isinstance(value, list):
+            if all(not isinstance(item, (dict, list)) for item in value):
+                return [self._transform(item, rule, action) for item in value]
+            return self._walk(value)
+        if isinstance(value, dict):
             return self._walk(value)
         if value is None:
             return None
