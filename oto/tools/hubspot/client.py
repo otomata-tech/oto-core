@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from ...config import require_secret
+from ..common import raise_for_upstream
 
 # Type d'association par défaut HubSpot (note → objet). 202 = Note↔Contact,
 # mais l'API accepte les "HUBSPOT_DEFINED" via le endpoint /associations/default.
@@ -52,12 +53,7 @@ class HubSpotClient:
     def _request(self, method: str, path: str, **kwargs) -> Any:
         url = f"{self.BASE_URL}{path}"
         resp = self.session.request(method, url, timeout=30, **kwargs)
-        if resp.status_code >= 400:
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise Exception(f"HubSpot HTTP {resp.status_code}: {body}")
+        raise_for_upstream(resp, service="hubspot")
         return resp.json() if resp.content else {}
 
     # --- Objets CRM (génériques) -------------------------------------------

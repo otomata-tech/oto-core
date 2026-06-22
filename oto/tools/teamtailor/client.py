@@ -21,6 +21,7 @@ from typing import Any, Dict, Optional
 import requests
 
 from ...config import require_secret
+from ..common import raise_for_upstream
 
 # Version d'API Teamtailor figée (en-tête obligatoire). À bumper consciemment.
 _API_VERSION = "20210218"
@@ -51,12 +52,7 @@ class TeamtailorClient:
         """Appel brut JSON:API (échappatoire générique). `path` commence par `/`."""
         url = f"{self.BASE_URL}{path}"
         resp = self.session.request(method, url, timeout=30, **kwargs)
-        if resp.status_code >= 400:
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise Exception(f"Teamtailor HTTP {resp.status_code}: {body}")
+        raise_for_upstream(resp, service="teamtailor")
         return resp.json() if resp.content else {}
 
     @staticmethod

@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from ...config import require_secret
+from ..common import raise_for_upstream
 
 
 class LeverClient:
@@ -40,12 +41,7 @@ class LeverClient:
     def _request(self, method: str, path: str, **kwargs) -> Any:
         url = f"{self.BASE_URL}{path}"
         resp = self.session.request(method, url, timeout=30, **kwargs)
-        if resp.status_code >= 400:
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise Exception(f"Lever HTTP {resp.status_code}: {body}")
+        raise_for_upstream(resp, service="lever")
         return resp.json() if resp.content else {}
 
     # --- Opportunities (candidats dans un pipeline) -------------------------

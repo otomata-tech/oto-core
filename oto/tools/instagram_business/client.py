@@ -28,6 +28,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from ...config import require_secret
+from ..common import raise_for_upstream
 
 
 class InstagramBusinessClient:
@@ -62,12 +63,7 @@ class InstagramBusinessClient:
         params["access_token"] = self.access_token
         url = f"{self.base_url}/{path.lstrip('/')}"
         resp = self.session.request(method, url, params=params, data=data, timeout=60)
-        if resp.status_code >= 400:
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise Exception(f"Instagram Graph API HTTP {resp.status_code}: {body}")
+        raise_for_upstream(resp, service="instagram")
         return resp.json() if resp.content else {}
 
     # --- conteneurs (étape 1 de la publication) -----------------------------

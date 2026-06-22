@@ -7,7 +7,7 @@ from urllib.parse import urlparse, parse_qs
 import requests
 
 from ...config import require_secret
-from ..common import FieldFilter
+from ..common import FieldFilter, raise_for_upstream
 
 
 class FolkClient:
@@ -30,13 +30,7 @@ class FolkClient:
                 wait = int(resp.headers.get("Retry-After", 2))
                 time.sleep(wait)
                 continue
-            if resp.status_code >= 400:
-                try:
-                    error_body = resp.json()
-                except Exception:
-                    error_body = resp.text
-                raise Exception(f"HTTP {resp.status_code}: {error_body}")
-            resp.raise_for_status()
+            raise_for_upstream(resp, service="folk")
             return self.field_filter.apply(resp.json()) if resp.content else {}
         raise Exception("Rate limit exceeded after retries")
 

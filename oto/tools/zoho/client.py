@@ -6,6 +6,7 @@ from typing import Any, Optional
 import requests
 
 from ...config import require_secret, get_secret
+from ..common import raise_for_upstream
 
 
 class ZohoClient:
@@ -90,12 +91,7 @@ class ZohoClient:
                 time.sleep(wait)
                 continue
 
-            if resp.status_code >= 400:
-                try:
-                    error_body = resp.json()
-                except Exception:
-                    error_body = resp.text
-                raise Exception(f"HTTP {resp.status_code}: {error_body}")
+            raise_for_upstream(resp, service="zoho")
 
             return resp.json() if resp.content else {}
 

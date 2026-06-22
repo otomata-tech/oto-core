@@ -23,6 +23,7 @@ from typing import Any, Dict, Optional
 import requests
 
 from ...config import require_secret
+from ..common import raise_for_upstream
 
 
 class ZapierClient:
@@ -47,12 +48,7 @@ class ZapierClient:
     def _request(self, method: str, path: str, **kwargs) -> Any:
         url = f"{self.BASE_URL}{path}"
         resp = self.session.request(method, url, timeout=60, **kwargs)
-        if resp.status_code >= 400:
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise Exception(f"Zapier HTTP {resp.status_code}: {body}")
+        raise_for_upstream(resp, service="zapier")
         return resp.json() if resp.content else {}
 
     def list_actions(self) -> Dict[str, Any]:

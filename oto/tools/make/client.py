@@ -24,6 +24,7 @@ from typing import Any, Dict, Optional
 import requests
 
 from ...config import require_secret
+from ..common import raise_for_upstream
 
 
 class MakeClient:
@@ -53,12 +54,7 @@ class MakeClient:
     def _request(self, method: str, path: str, **kwargs) -> Any:
         url = f"{self.base_url}/api/v2{path}"
         resp = self.session.request(method, url, timeout=30, **kwargs)
-        if resp.status_code >= 400:
-            try:
-                body = resp.json()
-            except Exception:
-                body = resp.text
-            raise Exception(f"Make HTTP {resp.status_code}: {body}")
+        raise_for_upstream(resp, service="make")
         return resp.json() if resp.content else {}
 
     # --- Découverte (organisations / équipes) -------------------------------
