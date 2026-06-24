@@ -19,9 +19,12 @@ class SheetsClientError(Exception):
 class SheetsClient:
     """Google Sheets API client."""
 
-    def __init__(self, account: Optional[str] = None):
+    def __init__(self, account: Optional[str] = None, credentials=None):
         try:
-            if account or list_accounts():
+            if credentials is not None:
+                # Injected OAuth user credentials (backend per-user)
+                pass
+            elif account or list_accounts():
                 credentials = get_user_credentials(SCOPES, account=account)
             else:
                 credentials = get_credentials(SCOPES)

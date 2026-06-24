@@ -25,7 +25,7 @@ class DriveClient:
     CACHE_DIR = get_cache_dir() / 'google-drive'
     CACHE_TTL = 3600  # 1 hour default cache TTL
 
-    def __init__(self, credentials_json: str = None, cache_ttl: int = CACHE_TTL, account: str = None):
+    def __init__(self, credentials_json: str = None, cache_ttl: int = CACHE_TTL, account: str = None, credentials=None):
         """
         Initialize Drive client. Tries OAuth user credentials first, falls back to service account.
 
@@ -33,13 +33,18 @@ class DriveClient:
             credentials_json: Path to Google Service Account JSON file (legacy)
             cache_ttl: Cache time-to-live in seconds (default: 1 hour)
             account: OAuth account name (None = auto-detect)
+            credentials: pre-resolved OAuth credentials object (backend per-user),
+                takes precedence over account/credentials_json
         """
         self.cache_ttl = cache_ttl
         self._ensure_cache_dir()
 
         # Load credentials
         try:
-            if credentials_json and Path(credentials_json).exists():
+            if credentials is not None:
+                # Injected OAuth user credentials (backend per-user)
+                self.credentials = credentials
+            elif credentials_json and Path(credentials_json).exists():
                 # Legacy: load from file path
                 with open(credentials_json, 'r') as f:
                     creds_dict = json.load(f)

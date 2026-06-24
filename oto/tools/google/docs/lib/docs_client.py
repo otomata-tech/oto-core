@@ -25,8 +25,11 @@ class DocsClient:
 
     SCOPES = ['https://www.googleapis.com/auth/documents']
 
-    def __init__(self, credentials_json: str = None, account: str = None):
-        if credentials_json and Path(credentials_json).exists():
+    def __init__(self, credentials_json: str = None, account: str = None, credentials=None):
+        if credentials is not None:
+            # Injected OAuth user credentials (backend per-user)
+            self.credentials = credentials
+        elif credentials_json and Path(credentials_json).exists():
             import json
             with open(credentials_json, 'r') as f:
                 creds_dict = json.load(f)
@@ -93,7 +96,7 @@ class DocsClient:
             tmp_path = fh.name
 
         try:
-            drive = DriveClient(account=account)
+            drive = DriveClient(account=account, credentials=self.credentials)
             media = MediaFileUpload(tmp_path, mimetype='text/html', resumable=True)
             request = drive.service.files().create(
                 body={
@@ -200,7 +203,7 @@ class DocsClient:
             tmp_path = fh.name
 
         try:
-            drive = DriveClient(account=account)
+            drive = DriveClient(account=account, credentials=self.credentials)
             media = MediaFileUpload(tmp_path, mimetype='text/html', resumable=True)
             request = drive.service.files().update(
                 fileId=doc_id,
