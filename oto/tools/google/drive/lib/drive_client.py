@@ -151,16 +151,18 @@ class DriveClient:
 
             final_query = " and ".join(filters)
 
-            # Execute query
+            # Execute query — page_size = hard cap on total results returned
+            # (paginate only until reached). Drive API max per page = 1000.
             results = []
             page_token = None
+            api_page_size = min(max(page_size, 1), 1000)
 
             while True:
                 request = self.service.files().list(
                     q=final_query,
                     spaces='drive',
                     fields=f'nextPageToken, {fields}',
-                    pageSize=page_size,
+                    pageSize=api_page_size,
                     pageToken=page_token,
                     supportsAllDrives=True,
                     includeItemsFromAllDrives=True
@@ -170,8 +172,10 @@ class DriveClient:
                 results.extend(response.get('files', []))
 
                 page_token = response.get('nextPageToken')
-                if not page_token:
+                if not page_token or len(results) >= page_size:
                     break
+
+            results = results[:page_size]
 
             # Cache results
             self._save_cache(cache_key, results)
