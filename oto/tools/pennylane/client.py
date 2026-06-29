@@ -19,6 +19,7 @@ Usage:
     accounts = client.fetch_all_pages("ledger_accounts")
 """
 
+import io
 import time
 from typing import Optional
 
@@ -292,14 +293,26 @@ class PennylaneClient:
     def upload_file(self, file_path: str) -> dict:
         """Upload a file (PDF) to Pennylane. Returns dict with id, filename, url."""
         import os
-        url = f"{self.BASE_URL}/file_attachments"
         filename = os.path.basename(file_path)
         with open(file_path, "rb") as f:
-            response = self.session.post(
-                url,
-                files={"file": (filename, f, "application/pdf")},
-                timeout=60,
-            )
+            return self.upload_file_bytes(f.read(), filename)
+
+    def upload_file_bytes(self, data: bytes, filename: str,
+                          content_type: str = "application/pdf") -> dict:
+        """Upload des OCTETS (PDF) sur Pennylane sans passer par le disque.
+
+        Variante de `upload_file` pour un appelant qui détient déjà les octets
+        (fichier « côté oto » : Drive, pièce Gmail, URL — résolus en amont). Poste
+        en multipart sur `POST /file_attachments`. Renvoie `{id, filename, url}` ;
+        sur erreur `{error, details, status_code}`. L'`id` est le `file_attachment_id`
+        à passer à `import_supplier_invoice`.
+        """
+        url = f"{self.BASE_URL}/file_attachments"
+        response = self.session.post(
+            url,
+            files={"file": (filename, io.BytesIO(data), content_type)},
+            timeout=60,
+        )
         if not response.ok:
             return {
                 "error": str(response.status_code),
@@ -307,6 +320,43 @@ class PennylaneClient:
                 "status_code": response.status_code,
             }
         return response.json()
+
+    def import_supplier_invoice(
+        self, file_attachment_id: int, supplier_id: int, date: str, deadline: str,
+        currency_amount_before_tax: str, currency_amount: str, currency_tax: str,
+        invoice_lines: list[dict], currency: str = "EUR",
+        external_reference: Optional[str] = None, import_as_incomplete: bool = False,
+        invoice_number: Optional[str] = None, label: Optional[str] = None,
+    ) -> dict:
+        """Crée une facture FOURNISSEUR à partir d'une pièce déjà uploadée.
+
+        `POST /supplier_invoices/import` : lie le `file_attachment_id` (cf.
+        `upload_file_bytes`) à une facture fournisseur en brouillon. Pas d'OCR côté
+        Pennylane — l'appelant FOURNIT les champs (lus depuis le PDF) : `supplier_id`,
+        `date`/`deadline` (ISO), montants **en string** (`currency_amount_before_tax`,
+        `currency_amount`=TTC, `currency_tax`), et `invoice_lines` (≥1). Pennylane
+        déduplique par PDF (422 si le même file_attachment est ré-importé) ;
+        `external_reference` trace la source et garde l'appelant idempotent.
+        """
+        body = {
+            "file_attachment_id": file_attachment_id,
+            "supplier_id": supplier_id,
+            "date": date,
+            "deadline": deadline,
+            "currency": currency,
+            "currency_amount_before_tax": currency_amount_before_tax,
+            "currency_amount": currency_amount,
+            "currency_tax": currency_tax,
+            "invoice_lines": invoice_lines,
+            "import_as_incomplete": import_as_incomplete,
+        }
+        if external_reference:
+            body["external_reference"] = external_reference
+        if invoice_number:
+            body["invoice_number"] = invoice_number
+        if label:
+            body["label"] = label
+        return self.post("supplier_invoices/import", body)
 
     # --- Customers ---
 

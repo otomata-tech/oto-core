@@ -228,6 +228,33 @@ class DriveClient:
         except Exception as e:
             raise DriveClientError(f"Failed to download file {file_id}: {e}")
 
+    def get_file_bytes(self, file_id: str) -> Dict:
+        """Récupère le CONTENU d'un fichier Drive en mémoire (octets bruts).
+
+        Retourne {filename, mimeType, size, data: bytes}. Identique à
+        `download_file` mais **n'écrit rien sur disque** — pour un consommateur
+        sans FS (serveur MCP) qui veut les octets (relai vers un autre connecteur,
+        lecture, URL signée). Fichiers binaires/uploadés (PDF, image…) via
+        `get_media`. Pour un Google Doc/Sheet natif, utiliser `export_file`
+        (get_media échoue sur les types Google natifs).
+        """
+        try:
+            metadata = self.service.files().get(
+                fileId=file_id, fields='id,name,mimeType,size',
+                supportsAllDrives=True,
+            ).execute()
+            data = self.service.files().get_media(
+                fileId=file_id, supportsAllDrives=True,
+            ).execute()
+            return {
+                'filename': metadata['name'],
+                'mimeType': metadata['mimeType'],
+                'size': len(data),
+                'data': data,
+            }
+        except Exception as e:
+            raise DriveClientError(f"Failed to read file {file_id}: {e}")
+
     def export_file(self, file_id: str, output_path: str, mime_type: str = 'text/plain') -> Dict:
         """
         Export a Google Docs/Sheets/Slides file to a specific format.
