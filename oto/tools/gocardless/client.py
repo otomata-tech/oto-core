@@ -169,7 +169,7 @@ class GoCardlessClient:
 
         Renvoie un dict aplati : montant, statut, dates, et la contrepartie
         (email, nom/société, metadata). ⚠️ La metadata GoCardless ne contient
-        pas forcément d'identifiant client externe (cas Movinmotion : vide).
+        pas forcément d'identifiant client externe (cas observé chez un client : vide).
         """
         p = self.get_payment(payment_id)
         if "error" in p:
