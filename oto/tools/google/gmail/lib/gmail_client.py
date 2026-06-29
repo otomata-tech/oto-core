@@ -435,9 +435,11 @@ class GmailClient:
     def _list_attachments(self, payload: dict) -> list[dict]:
         """List attachment metadata from message payload.
 
-        `attachmentId` est inclus : c'est le handle requis pour récupérer le
-        contenu via `get_attachment` (un consommateur MCP/agent ne peut pas
-        deviner l'id, il doit le lire ici).
+        Renvoie {filename, mimeType, size}. **Pas d'`attachmentId`** : Gmail le
+        régénère à chaque `messages.get` (vérifié — deux lectures successives du
+        même message donnent des ids différents) → ce n'est pas un handle stable
+        entre appels. Le contenu se récupère par `get_attachment(message_id,
+        filename)`, qui résout l'id frais dans un seul `messages.get`.
         """
         attachments = []
         for part in self._iter_parts(payload):
@@ -448,33 +450,39 @@ class GmailClient:
                     'filename': filename,
                     'mimeType': part.get('mimeType', ''),
                     'size': part.get('body', {}).get('size', 0),
-                    'attachmentId': att_id,
                 })
         return attachments
 
-    def get_attachment(self, message_id: str, attachment_id: str) -> dict:
-        """Récupère le CONTENU d'une pièce jointe (octets bruts) + ses métadonnées.
+    def get_attachment(self, message_id: str, filename: str, index: int = 0) -> dict:
+        """Récupère le CONTENU d'une pièce jointe par son NOM de fichier.
 
-        Retourne {filename, mimeType, size, data: bytes}. `attachment_id` provient
-        de la liste `attachments` d'un `get_message` (champ `attachmentId`). Client
-        pur : renvoie les octets, n'écrit rien sur disque (≠ `download_attachments`,
-        réservé à la CLI). Lève `GmailClientError` si l'id est introuvable.
+        Retourne {filename, mimeType, size, data: bytes}. Le **filename** est le
+        handle (stable) — pas l'attachmentId Gmail, volatile entre appels. La
+        résolution nom→id et le téléchargement se font dans le MÊME `messages.get`
+        (l'id est donc toujours frais). `index` (défaut 0) départage si plusieurs
+        PJ portent le même nom (ex. `image.png` inline multiples). Client pur :
+        renvoie les octets, n'écrit rien sur disque (≠ `download_attachments`,
+        réservé à la CLI). Lève `GmailClientError` si introuvable.
         """
         msg = self.service.users().messages().get(
             userId='me', id=message_id, format='full',
         ).execute()
-        filename, mime = None, None
+        matches = []
         for part in self._iter_parts(msg.get('payload', {})):
-            if part.get('body', {}).get('attachmentId') == attachment_id:
-                filename = part.get('filename')
-                mime = part.get('mimeType', '')
-                break
-        if filename is None:
+            att_id = part.get('body', {}).get('attachmentId')
+            if att_id and part.get('filename') == filename:
+                matches.append((att_id, part.get('mimeType', '')))
+        if not matches:
             raise GmailClientError(
-                f"Attachment {attachment_id!r} introuvable dans le message {message_id!r}."
+                f"Pièce jointe {filename!r} introuvable dans le message {message_id!r}."
             )
+        if index < 0 or index >= len(matches):
+            raise GmailClientError(
+                f"index {index} hors bornes ({len(matches)} PJ nommées {filename!r})."
+            )
+        att_id, mime = matches[index]
         att = self.service.users().messages().attachments().get(
-            userId='me', messageId=message_id, id=attachment_id,
+            userId='me', messageId=message_id, id=att_id,
         ).execute()
         data = base64.urlsafe_b64decode(att['data'])
         return {
