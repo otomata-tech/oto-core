@@ -173,6 +173,12 @@ class FolkClient:
             "visibility": visibility,
         }).get("data", {})
 
+    def update_note(self, note_id: str, **fields) -> Dict:
+        return self._request("PATCH", f"notes/{note_id}", json=fields).get("data", {})
+
+    def delete_note(self, note_id: str) -> Dict:
+        return self._request("DELETE", f"notes/{note_id}")
+
     # --- Interactions ---
 
     def create_interaction(self, entity_id: str, type: str, title: str,
