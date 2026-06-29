@@ -433,7 +433,12 @@ class GmailClient:
         ).execute()
 
     def _list_attachments(self, payload: dict) -> list[dict]:
-        """List attachment metadata from message payload."""
+        """List attachment metadata from message payload.
+
+        `attachmentId` est inclus : c'est le handle requis pour récupérer le
+        contenu via `get_attachment` (un consommateur MCP/agent ne peut pas
+        deviner l'id, il doit le lire ici).
+        """
         attachments = []
         for part in self._iter_parts(payload):
             filename = part.get('filename')
@@ -443,8 +448,41 @@ class GmailClient:
                     'filename': filename,
                     'mimeType': part.get('mimeType', ''),
                     'size': part.get('body', {}).get('size', 0),
+                    'attachmentId': att_id,
                 })
         return attachments
+
+    def get_attachment(self, message_id: str, attachment_id: str) -> dict:
+        """Récupère le CONTENU d'une pièce jointe (octets bruts) + ses métadonnées.
+
+        Retourne {filename, mimeType, size, data: bytes}. `attachment_id` provient
+        de la liste `attachments` d'un `get_message` (champ `attachmentId`). Client
+        pur : renvoie les octets, n'écrit rien sur disque (≠ `download_attachments`,
+        réservé à la CLI). Lève `GmailClientError` si l'id est introuvable.
+        """
+        msg = self.service.users().messages().get(
+            userId='me', id=message_id, format='full',
+        ).execute()
+        filename, mime = None, None
+        for part in self._iter_parts(msg.get('payload', {})):
+            if part.get('body', {}).get('attachmentId') == attachment_id:
+                filename = part.get('filename')
+                mime = part.get('mimeType', '')
+                break
+        if filename is None:
+            raise GmailClientError(
+                f"Attachment {attachment_id!r} introuvable dans le message {message_id!r}."
+            )
+        att = self.service.users().messages().attachments().get(
+            userId='me', messageId=message_id, id=attachment_id,
+        ).execute()
+        data = base64.urlsafe_b64decode(att['data'])
+        return {
+            'filename': filename,
+            'mimeType': mime or 'application/octet-stream',
+            'size': len(data),
+            'data': data,
+        }
 
     def _iter_parts(self, payload: dict):
         """Recursively yield all parts from a message payload."""
