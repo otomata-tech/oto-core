@@ -139,8 +139,16 @@ class FolkClient:
 
     # --- Deals (objects in groups) ---
 
-    def list_deals(self, group_id: str, object_type: str = "deals") -> List[Dict]:
-        return self._paginate(f"groups/{group_id}/{object_type}")
+    def list_deals(self, group_id: str, object_type: str = "deals", **filters) -> List[Dict]:
+        params = {}
+        for key, val in filters.items():
+            params[f"filter[{key}][like]"] = val
+        return self._paginate(f"groups/{group_id}/{object_type}", params)
+
+    def get_deal(self, group_id: str, deal_id: str, object_type: str = "deals") -> Dict:
+        return self._request(
+            "GET", f"groups/{group_id}/{object_type}/{deal_id}"
+        ).get("data", {})
 
     def create_deal(self, group_id: str, name: str, object_type: str = "deals",
                     people_ids: List[str] = None, company_ids: List[str] = None,
@@ -157,6 +165,9 @@ class FolkClient:
     def update_deal(self, group_id: str, deal_id: str, object_type: str = "deals",
                     **fields) -> Dict:
         return self._request("PATCH", f"groups/{group_id}/{object_type}/{deal_id}", json=fields).get("data", {})
+
+    def delete_deal(self, group_id: str, deal_id: str, object_type: str = "deals") -> Dict:
+        return self._request("DELETE", f"groups/{group_id}/{object_type}/{deal_id}")
 
     # --- Notes ---
 
@@ -210,3 +221,26 @@ class FolkClient:
             "recurrenceRule": recurrence_rule,
             "visibility": visibility,
         }).get("data", {})
+
+    def get_reminder(self, reminder_id: str) -> Dict:
+        return self._request("GET", f"reminders/{reminder_id}").get("data", {})
+
+    def update_reminder(self, reminder_id: str, **fields) -> Dict:
+        return self._request("PATCH", f"reminders/{reminder_id}", json=fields).get("data", {})
+
+    def delete_reminder(self, reminder_id: str) -> Dict:
+        return self._request("DELETE", f"reminders/{reminder_id}")
+
+    # --- Users (workspace members, read-only) ---
+
+    def list_users(self) -> List[Dict]:
+        return self._paginate("users")
+
+    def get_current_user(self) -> Dict:
+        return self._request("GET", "users/me").get("data", {})
+
+    def get_user(self, user_id: str) -> Dict:
+        """Fetch a workspace user by ID. `user_id="me"` returns the current user."""
+        if user_id == "me":
+            return self.get_current_user()
+        return self._request("GET", f"users/{user_id}").get("data", {})

@@ -1,0 +1,119 @@
+"""FolkClient — verrouille method+endpoint des opérations ajoutées (deals get/
+delete/search, reminders get/update/delete, users list/me/get).
+
+Mocke `requests.request` : on vérifie le CONTRAT HTTP (verbe + URL + body) que le
+client construit, sans réseau ni clé réelle.
+"""
+import json
+
+import pytest
+
+from oto.tools.folk import client as folk_client
+from oto.tools.folk.client import FolkClient
+
+BASE = "https://api.folk.app/v1"
+
+
+class _Resp:
+    def __init__(self, payload):
+        self.status_code = 200
+        self.headers = {}
+        self._payload = payload
+        self.content = json.dumps(payload).encode()
+
+    def json(self):
+        return self._payload
+
+
+class _Stub:
+    """field_filter no-op (évite la lecture de ~/.otomata/config.yaml)."""
+
+    def apply(self, x):
+        return x
+
+
+@pytest.fixture
+def calls(monkeypatch):
+    captured = []
+
+    def fake_request(method, url, headers=None, **kwargs):
+        captured.append({"method": method, "url": url, **kwargs})
+        return _Resp({"data": {"id": "x", "items": [], "pagination": {}}})
+
+    monkeypatch.setattr(folk_client.requests, "request", fake_request)
+    return captured
+
+
+@pytest.fixture
+def c():
+    return FolkClient(api_key="test-key", field_filter=_Stub())
+
+
+# --- Deals ---------------------------------------------------------------
+
+def test_get_deal(c, calls):
+    c.get_deal("grp_1", "obj_9")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/deals/obj_9"
+
+
+def test_get_deal_custom_object(c, calls):
+    c.get_deal("grp_1", "obj_9", object_type="projects")
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/projects/obj_9"
+
+
+def test_delete_deal(c, calls):
+    c.delete_deal("grp_1", "obj_9")
+    assert calls[-1]["method"] == "DELETE"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/deals/obj_9"
+
+
+def test_search_deals_via_list_filters(c, calls):
+    c.list_deals("grp_1", name="Acme")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/deals"
+    assert calls[-1]["params"]["filter[name][like]"] == "Acme"
+
+
+# --- Reminders -----------------------------------------------------------
+
+def test_get_reminder(c, calls):
+    c.get_reminder("rmd_1")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/reminders/rmd_1"
+
+
+def test_update_reminder(c, calls):
+    c.update_reminder("rmd_1", name="Follow-up")
+    assert calls[-1]["method"] == "PATCH"
+    assert calls[-1]["url"] == f"{BASE}/reminders/rmd_1"
+    assert calls[-1]["json"] == {"name": "Follow-up"}
+
+
+def test_delete_reminder(c, calls):
+    c.delete_reminder("rmd_1")
+    assert calls[-1]["method"] == "DELETE"
+    assert calls[-1]["url"] == f"{BASE}/reminders/rmd_1"
+
+
+# --- Users ---------------------------------------------------------------
+
+def test_list_users(c, calls):
+    c.list_users()
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/users"
+
+
+def test_get_current_user(c, calls):
+    c.get_current_user()
+    assert calls[-1]["url"] == f"{BASE}/users/me"
+
+
+def test_get_user_me_alias(c, calls):
+    c.get_user("me")
+    assert calls[-1]["url"] == f"{BASE}/users/me"
+
+
+def test_get_user_by_id(c, calls):
+    c.get_user("usr_42")
+    assert calls[-1]["url"] == f"{BASE}/users/usr_42"
