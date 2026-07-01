@@ -20,6 +20,7 @@ Usage:
 """
 
 import io
+import json
 import time
 from typing import Optional
 
@@ -27,6 +28,21 @@ import requests
 
 from ...config import require_secret
 from ..common import FieldFilter
+
+
+def _is_outstanding(transaction) -> bool:
+    """True si la transaction porte un `outstanding_balance` non nul (reste à
+    lettrer). Champ absent ou illisible → True (conservée : filtrer sur un champ
+    douteux ne doit pas faire disparaître de la donnée en silence)."""
+    if not isinstance(transaction, dict):
+        return True
+    value = transaction.get("outstanding_balance")
+    if value is None:
+        return True
+    try:
+        return float(str(value)) != 0.0
+    except (TypeError, ValueError):
+        return True
 
 
 class PennylaneClient:
@@ -272,9 +288,41 @@ class PennylaneClient:
         """Get expense categories."""
         return self.fetch("categories")
 
-    def get_transactions(self, max_pages: Optional[int] = None) -> list:
-        """Get bank transactions."""
-        return self.fetch_all_pages("transactions", max_pages=max_pages)
+    def get_transactions(self, max_pages: Optional[int] = None,
+                         period_start: Optional[str] = None,
+                         period_end: Optional[str] = None,
+                         only_outstanding: bool = False,
+                         per_page: int = 100) -> list:
+        """Get bank transactions, with optional source-side reduction levers.
+
+        Sans levier, l'endpoint renvoie TOUT l'historique (vécu : 307
+        transactions ≈ 247k chars — inexploitable par un agent). Les filtres
+        sont OPTIONNELS (le brut reste le défaut) :
+
+        Args:
+            max_pages: borne le nombre de pages ramenées.
+            period_start / period_end: bornes de date (YYYY-MM-DD), filtrées
+                CÔTÉ SERVEUR (param `filter` de l'API v2, opérateurs gteq/lteq
+                sur `date`) — le volume est réduit à la source.
+            only_outstanding: ne garde que les transactions non soldées
+                (`outstanding_balance` ≠ 0) — filtre côté client, appliqué aux
+                pages ramenées. Un montant absent/illisible est CONSERVÉ
+                (on ne perd pas de donnée sur un champ douteux).
+            per_page: taille de page (≤100) — affine la granularité de max_pages.
+        """
+        params: dict = {}
+        filters = []
+        if period_start:
+            filters.append({"field": "date", "operator": "gteq", "value": period_start})
+        if period_end:
+            filters.append({"field": "date", "operator": "lteq", "value": period_end})
+        if filters:
+            params["filter"] = json.dumps(filters)
+        items = self.fetch_all_pages("transactions", params or None,
+                                     max_pages=max_pages, per_page=per_page)
+        if only_outstanding:
+            items = [t for t in items if _is_outstanding(t)]
+        return items
 
     # --- Matching (lettrage) ---
 

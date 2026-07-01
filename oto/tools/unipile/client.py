@@ -273,11 +273,79 @@ class UnipileClient:
 
     # ---- messagerie ------------------------------------------------------
 
-    def list_chats(self, limit: int = 20, cursor: Optional[str] = None) -> dict:
+    def list_chats(self, limit: int = 20, cursor: Optional[str] = None,
+                   with_attendee_names: bool = False) -> dict:
+        """Fils de messagerie du compte connecté. Paginé (`limit` + `cursor`).
+
+        `with_attendee_names=True` enrichit chaque fil 1-à-1 de champs
+        `attendee_name`/`attendee_headline`/`attendee_profile_url` résolus en
+        batch via le carnet `/attendees` (les fils 1-à-1 LinkedIn arrivent avec
+        `name: null` et un `attendee_provider_id` opaque — impossible de savoir
+        QUI sans ça). Enrichissement best-effort : un id non résolu laisse les
+        champs absents, une erreur du carnet n'empêche pas la liste."""
         params: dict[str, Any] = {"account_id": self.account_id(), "limit": limit}
         if cursor:
             params["cursor"] = cursor
-        return self._request("GET", "/chats", params=params)
+        data = self._request("GET", "/chats", params=params)
+        if with_attendee_names:
+            self._annotate_chat_attendees(data)
+        return data
+
+    def resolve_attendee_names(self, provider_ids, max_pages: int = 10,
+                               page_limit: int = 100) -> dict:
+        """Résout des `attendee_provider_id` en fiches attendee via le carnet
+        `/attendees` paginé (1 famille d'appels batch, PAS un appel par fil).
+
+        Retourne `{provider_id: attendee}` (name, picture_url, profile_url,
+        specifics…). Arrêt anticipé dès que tous les ids demandés sont résolus ;
+        borné à `max_pages` pages de `page_limit` — les ids au-delà restent
+        simplement absents de la map (best-effort)."""
+        wanted = {str(p) for p in provider_ids if p}
+        out: dict[str, dict] = {}
+        cursor = None
+        for _ in range(max_pages):
+            if not wanted - out.keys():
+                break
+            page = self.list_attendees(cursor=cursor, limit=page_limit)
+            items = (page or {}).get("items") or []
+            for att in items:
+                if not isinstance(att, dict):
+                    continue
+                pid = str(att.get("provider_id") or "")
+                if pid in wanted:
+                    out[pid] = att
+            cursor = (page or {}).get("cursor")
+            if not items or not cursor:
+                break
+        return out
+
+    def _annotate_chat_attendees(self, data: Any) -> None:
+        """Enrichit in-place les items d'un payload `/chats` avec le nom de leur
+        interlocuteur (`attendee_name`/`attendee_headline`/`attendee_profile_url`).
+        Best-effort : ne lève jamais (la liste des fils prime sur l'enrichissement)."""
+        items = (data or {}).get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return
+        ids = {str(it.get("attendee_provider_id"))
+               for it in items
+               if isinstance(it, dict) and it.get("attendee_provider_id")}
+        if not ids:
+            return
+        try:
+            resolved = self.resolve_attendee_names(ids)
+        except Exception:  # noqa: BLE001 — enrichissement best-effort voulu
+            logger.warning("unipile chats: résolution des attendees échouée, "
+                           "liste servie sans enrichissement", exc_info=True)
+            return
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            att = resolved.get(str(it.get("attendee_provider_id") or ""))
+            if not att:
+                continue
+            it["attendee_name"] = att.get("name")
+            it["attendee_headline"] = (att.get("specifics") or {}).get("occupation")
+            it["attendee_profile_url"] = att.get("profile_url")
 
     def list_messages(self, chat_id: str, limit: int = 50) -> dict:
         params = {"limit": limit}
@@ -317,12 +385,27 @@ class UnipileClient:
             params["limit"] = limit
         return self._request("GET", "/users/relations", params=params)
 
-    def list_invitations(self, direction: str = "received") -> dict:
-        """Invitations de connexion — `direction` = 'received' (reçues) ou 'sent'."""
+    def list_invitations(self, direction: str = "received",
+                         limit: Optional[int] = None,
+                         cursor: Optional[str] = None) -> dict:
+        """Invitations de connexion — `direction` = 'received' (reçues) ou 'sent'.
+        Paginé (`limit` + `cursor`) : sans borne l'endpoint renvoie TOUT le
+        backlog (vécu : ~72k chars, réponse inexploitable par un agent)."""
         d = "sent" if direction == "sent" else "received"
-        return self._request(
-            "GET", f"/users/invite/{d}", params={"account_id": self.account_id()}
-        )
+        params: dict[str, Any] = {"account_id": self.account_id()}
+        if limit:
+            params["limit"] = limit
+        if cursor:
+            params["cursor"] = cursor
+        data = self._request("GET", f"/users/invite/{d}", params=params)
+        # Garde-fou : si l'API ignore `limit`, on tronque côté client en le
+        # signalant (`truncated`) plutôt que de resservir le backlog entier.
+        if limit and isinstance(data, dict):
+            items = data.get("items")
+            if isinstance(items, list) and len(items) > limit:
+                data["items"] = items[:limit]
+                data["truncated"] = True
+        return data
 
     def send_invitation(self, provider_id: str,
                         message: Optional[str] = None) -> dict:
