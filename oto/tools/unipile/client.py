@@ -685,9 +685,11 @@ class UnipileClient:
             "PATCH", f"/chats/{quote(chat_id, safe='')}", json=body
         )
 
-    def react_message(self, message_id: str, reaction: str) -> dict:
+    def react_message(self, message_id: str, reaction: str,
+                      chat_id: Optional[str] = None) -> dict:
         """Réagit à un message (DM) avec un emoji natif (ex. '👍'). `message_id` =
-        id d'un message de `list_messages`."""
+        id d'un message de `list_messages`. `chat_id` n'est requis qu'en v2
+        (accepté et ignoré ici pour une signature commune aux deux clients)."""
         return self._request(
             "POST", f"/messages/{quote(message_id, safe='')}/reaction",
             json={"reaction": reaction},
