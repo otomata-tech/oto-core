@@ -25,6 +25,10 @@ Ce client **fold-in les fixes feedback** que la v2 seule ne donne pas :
   retryable** — jamais de donnée fausse renvoyée en silence.
 - **erreurs réseau propres** : les exceptions `requests` (DNS/timeout) sont mappées
   en `UnipileError` stable au lieu de fuiter `net::ERR_NAME_NOT_RESOLVED` (#177).
+- **résolution de slug tolérante** sur `get_company` (#176) : un nom de marque
+  passé comme slug (`mooniz`) qui tombe en 404 est retenté via une recherche
+  société → `public_identifier` canonique (`mooniz1`) ; échec → 404 propre
+  enrichi des candidats proches, jamais l'erreur brute.
 
 v2 est **beta** côté Unipile (nouveau compte + migration de données requis) : ce
 client est **opt-in** (résolu par config/env côté oto-mcp), v1 reste le défaut.
@@ -33,6 +37,7 @@ client est **opt-in** (résolu par config/env côté oto-mcp), v1 reste le défa
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 from urllib.parse import quote
 
@@ -72,6 +77,14 @@ def _sections_param(sections: str) -> Optional[list[str]]:
             continue
         out.append(p if p.startswith("linkedin_") else f"linkedin_{p}")
     return out or None
+
+
+def _slug_from_company_url(url: str) -> Optional[str]:
+    """Extrait le slug d'une URL LinkedIn société (`…/company/<slug>[/…]`)."""
+    if not url:
+        return None
+    m = re.search(r"/company/([^/?#]+)", url)
+    return m.group(1) if m else None
 
 
 class UnipileClientV2:
@@ -325,8 +338,9 @@ class UnipileClientV2:
             )
         return data
 
-    def get_company(self, identifier: str) -> dict:
-        """Fiche société. Garde #153 (idem get_profile, côté CompanyProfile)."""
+    def _get_company_raw(self, identifier: str) -> dict:
+        """GET société brut + garde anti-mismatch #153. Lève telle quelle
+        (404 inclus) — le fallback de résolution vit dans `get_company`."""
         data = self._request(
             "GET", self._acct(f"/linkedin/company/{quote(identifier, safe='')}")
         )
@@ -338,6 +352,56 @@ class UnipileClientV2:
                 "Réponse rejetée — réessaie."
             )
         return data
+
+    def _resolve_company_slugs(self, name: str, limit: int = 5) -> list[str]:
+        """#176 : cherche des sociétés par nom → `public_identifier` candidats,
+        par ordre de pertinence. Best-effort : ne doit jamais masquer le 404
+        d'origine (toute erreur de recherche → aucun candidat)."""
+        try:
+            res = self.search(category="companies", keywords=name)
+        except Exception:  # noqa: BLE001 — résolution best-effort, jamais fatale
+            return []
+        items = (res or {}).get("items") or (res or {}).get("data") or []
+        out: list[str] = []
+        for it in items[:limit]:
+            if not isinstance(it, dict):
+                continue
+            slug = it.get("public_identifier") or _slug_from_company_url(
+                it.get("public_profile_url") or it.get("profile_url") or ""
+            )
+            if slug:
+                out.append(slug)
+        return list(dict.fromkeys(out))  # dédup en conservant l'ordre
+
+    def get_company(self, identifier: str, resolve: bool = True) -> dict:
+        """Fiche société. `identifier` = slug (`public_identifier`) ou id numérique.
+
+        Garde #153 : rejette une réponse d'un autre objet/identifiant.
+        Résolution tolérante #176 : si le slug fourni est introuvable (404) et
+        non numérique, on tente une recherche société par nom pour retrouver le
+        `public_identifier` canonique (ex. `mooniz` → `mooniz1`) et on réessaie.
+        Échec → 404 propre enrichi des candidats proches (`resolve=False` coupe
+        le fallback)."""
+        try:
+            return self._get_company_raw(identifier)
+        except UnipileError as e:
+            ident = str(identifier).strip()
+            if not resolve or e.status_code != 404 or ident.isdigit():
+                raise
+            candidates = self._resolve_company_slugs(ident)
+            for slug in candidates:
+                if slug.strip().lower() != ident.lower():
+                    try:
+                        return self._get_company_raw(slug)
+                    except UnipileError:
+                        continue
+            if candidates:
+                raise UnipileError(
+                    f"Unipile 404: société {identifier!r} introuvable. "
+                    f"Slugs candidats proches : {', '.join(candidates)}.",
+                    status_code=404,
+                ) from e
+            raise
 
     # ---- messagerie ------------------------------------------------------
 

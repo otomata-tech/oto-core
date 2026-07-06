@@ -103,6 +103,83 @@ def test_get_company_rejects_user_object():
         c.get_company("acme")
 
 
+# ---- résolution de slug tolérante (#176) --------------------------------
+
+def _company_stub(known_slug, search_hits):
+    """Stub `_request` : GET company connu → 200 ; GET inconnu → 404 ;
+    POST search/companies → `search_hits`."""
+    def fake(method, path, params=None, json=None):
+        if method == "POST" and path.endswith("/linkedin/search/companies"):
+            return {"data": search_hits}
+        if method == "GET" and path.endswith(f"/linkedin/company/{known_slug}"):
+            return {"object": "CompanyProfile", "public_identifier": known_slug}
+        raise UnipileError("Unipile 404: Company not found", status_code=404)
+    return fake
+
+
+def test_get_company_falls_back_to_canonical_slug():
+    # "mooniz" (marque) en 404 → search → public_identifier "mooniz1" → 200 (#176).
+    c = _client()
+    c._request = _company_stub("mooniz1", [{"public_identifier": "mooniz1"}])
+    out = c.get_company("mooniz")
+    assert out["public_identifier"] == "mooniz1"
+
+
+def test_get_company_fallback_via_profile_url():
+    # Candidat sans public_identifier → slug dérivé de l'URL /company/<slug>.
+    c = _client()
+    c._request = _company_stub(
+        "mooniz1",
+        [{"public_profile_url": "https://www.linkedin.com/company/mooniz1/"}],
+    )
+    assert c.get_company("mooniz")["public_identifier"] == "mooniz1"
+
+
+def test_get_company_404_lists_candidates_when_retry_fails():
+    # Search rend des candidats mais aucun ne résout → 404 propre + candidats.
+    c = _client()
+
+    def fake(method, path, params=None, json=None):
+        if method == "POST" and path.endswith("/linkedin/search/companies"):
+            return {"data": [{"public_identifier": "other-co"}]}
+        raise UnipileError("Unipile 404: Company not found", status_code=404)
+
+    c._request = fake
+    with pytest.raises(UnipileError) as e:
+        c.get_company("mooniz")
+    assert e.value.status_code == 404
+    assert "other-co" in str(e.value)
+
+
+def test_get_company_numeric_id_no_fallback():
+    # Un id numérique introuvable ne déclenche PAS de recherche par nom.
+    calls = []
+    c = _client()
+
+    def fake(method, path, params=None, json=None):
+        calls.append((method, path))
+        raise UnipileError("Unipile 404: Company not found", status_code=404)
+
+    c._request = fake
+    with pytest.raises(UnipileError):
+        c.get_company("93154483")
+    assert not any("search" in p for _, p in calls)  # pas de fallback recherche
+
+
+def test_get_company_resolve_false_disables_fallback():
+    calls = []
+    c = _client()
+
+    def fake(method, path, params=None, json=None):
+        calls.append(path)
+        raise UnipileError("Unipile 404: Company not found", status_code=404)
+
+    c._request = fake
+    with pytest.raises(UnipileError):
+        c.get_company("mooniz", resolve=False)
+    assert not any("search" in p for p in calls)
+
+
 def test_get_profile_with_sections_mapping():
     rec = []
     c = _client(canned={"object": "UserProfile", "public_identifier": "x", "id": "x"},

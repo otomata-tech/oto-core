@@ -1,10 +1,14 @@
 requests>=2.28.0
-france-opendata>=0.1.0
+france-opendata>=0.7.0
 python-dotenv>=1.0.0
 pyyaml>=6.0
+defusedxml>=0.7.1
 
 [all]
-oto-core[anthropic,browser,google,stock,vivatech]
+oto-core[anonymize,anthropic,browser,google,stock,vivatech]
+
+[anonymize]
+faker>=20.0.0
 
 [anthropic]
 anthropic>=0.40.0

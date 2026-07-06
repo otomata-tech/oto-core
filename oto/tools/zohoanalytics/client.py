@@ -131,10 +131,19 @@ class ZohoAnalyticsClient:
         return self._request(
             "GET", self._v2(f"workspaces/{workspace_id}/views"), params=params)
 
-    def get_view_details(self, workspace_id: str, view_id: str) -> dict:
-        """Get metadata of one view (columns, type, folder…)."""
-        return self._request(
-            "GET", self._v2(f"workspaces/{workspace_id}/views/{view_id}"))
+    def get_view_details(self, view_id: str, *, with_meta: bool = True) -> dict:
+        """Get metadata of one view (columns, type, folder…).
+
+        L'API v2 keye le détail d'une vue sur le `view_id` **globalement unique** —
+        l'endpoint est `/restapi/v2/views/<view-id>`, **PAS** imbriqué sous le
+        workspace : un GET sur `/workspaces/<ws>/views/<view-id>` renvoie
+        `INVALID_METHOD` (errorCode 8541), ce chemin n'accepte pas GET.
+        `with_meta` (CONFIG `withInvolvedMetaInfo`) ramène le détail des colonnes
+        + vues impliquées — sinon on n'obtient que l'entête de la vue."""
+        params = {}
+        if with_meta:
+            params["CONFIG"] = json.dumps({"withInvolvedMetaInfo": True})
+        return self._request("GET", self._v2(f"views/{view_id}"), params=params)
 
     # --- Export des données ---
 
