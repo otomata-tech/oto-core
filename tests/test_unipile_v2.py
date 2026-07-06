@@ -321,3 +321,61 @@ def test_http_error_sanitizes_account_id():
         c.inmail_balance()
     assert "acc-SECRET" not in str(e.value)      # account_id caviardé (#178)
     assert "<account>" in str(e.value)
+
+
+# ---- hosted-auth v2 : body réécrit + réponse sur `link` (deltas live 2026-07-06) --
+
+def test_hosted_auth_link_v2_body_and_link_key():
+    rec = []
+    c = _client(canned={"object": "HostedAuthLink", "link": "https://auth.unipile.com/x"},
+                recorder=rec)
+    url = c.hosted_auth_link(providers=["LINKEDIN"], name="nonce1",
+                             notify_url="https://x/webhook",
+                             success_redirect_url="https://x/ok",
+                             failure_redirect_url="https://x/ko")
+    assert url == "https://auth.unipile.com/x"        # lu sur `link`, pas `url`
+    method, path, _, body = rec[0]
+    assert method == "POST" and path == "/auth/link"
+    assert body["providers"] == ["linkedin"]          # minuscule (v1 passait LINKEDIN)
+    assert "expires_on" in body and "expiresOn" not in body
+    assert body["redirect_uri"] == "https://x/ok"     # un seul redirect
+    assert "success_redirect_url" not in body and "failure_redirect_url" not in body
+    assert body["name"] == "nonce1" and body["notify_url"] == "https://x/webhook"
+
+
+def test_hosted_auth_link_providers_wildcard_when_none():
+    rec = []
+    c = _client(canned={"link": "u"}, recorder=rec)
+    c.hosted_auth_link()
+    assert rec[0][3]["providers"] == "*"              # aucun provider → tous
+
+
+# ---- posts/comments/reactions : slug public → provider_id URN (delta v2) --------
+
+def _member_stub(recorder):
+    def fake(method, path, params=None, json=None):
+        recorder.append((method, path, params, json))
+        if path.endswith("/users/john-doe"):         # get_profile(slug)
+            return {"object": "UserProfile", "public_identifier": "john-doe",
+                    "id": "ACoAAB123"}
+        return {"data": []}
+    return fake
+
+
+def test_member_posts_resolves_slug_to_urn():
+    rec = []
+    c = UnipileClientV2(api_key="k", account_id="acc")
+    c._request = _member_stub(rec)  # type: ignore[method-assign]
+    c.list_member_posts("john-doe")
+    paths = [p for _, p, _, _ in rec]
+    assert "/acc/users/john-doe" in paths             # a résolu le profil
+    assert "/acc/users/ACoAAB123/posts" in paths      # puis posts sur l'URN
+
+
+def test_member_reactions_urn_skips_profile_lookup():
+    rec = []
+    c = UnipileClientV2(api_key="k", account_id="acc")
+    c._request = _member_stub(rec)  # type: ignore[method-assign]
+    c.list_member_reactions("ACoAAB999")              # déjà un URN
+    paths = [p for _, p, _, _ in rec]
+    assert paths == ["/acc/users/ACoAAB999/reactions"]  # aucune résolution de profil

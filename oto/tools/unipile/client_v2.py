@@ -191,26 +191,35 @@ class UnipileClientV2:
         failure_redirect_url: Optional[str] = None,
         ttl_minutes: int = 60,
     ) -> str:
-        """URL d'auth hébergée (v2 : `POST /v2/auth/link`, createAuthLink)."""
+        """URL d'auth hébergée (v2 : `POST /v2/auth/link`, createAuthLink).
+
+        Le schéma v2 diffère de v1 (deltas relevés en live 2026-07-06, l'index doc
+        ment) : `expires_on` (snake, pas `expiresOn`) ; `providers` = liste de codes
+        **minuscules** (`["linkedin"]`) ou `"*"` (tous), PAS `["LINKEDIN"]` ;
+        **un seul** `redirect_uri` (v2 ne sépare plus succès/échec) ; la réponse porte
+        le lien sur **`link`** (pas `url`). `name`/`notify_url` restent acceptés (→ la
+        corrélation webhook du hosted-auth #131 tient en v2)."""
         from datetime import datetime, timedelta, timezone
 
         expires = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
         body: dict[str, Any] = {
             "type": "create",
-            "providers": providers or ["LINKEDIN"],
+            # v1 passe ["LINKEDIN"] (majuscule) → v2 veut minuscule, ou "*" = tous.
+            "providers": [str(p).lower() for p in providers] if providers else "*",
             "api_url": f"https://{self.dsn}",
-            "expiresOn": expires.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "expires_on": expires.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         }
+        # v2 = un seul redirect_uri (l'échec n'a plus d'URL dédiée) ; on prend le
+        # succès, sinon l'échec en repli.
+        redirect = success_redirect_url or failure_redirect_url
+        if redirect:
+            body["redirect_uri"] = redirect
         if notify_url:
             body["notify_url"] = notify_url
         if name:
             body["name"] = name
-        if success_redirect_url:
-            body["success_redirect_url"] = success_redirect_url
-        if failure_redirect_url:
-            body["failure_redirect_url"] = failure_redirect_url
         data = self._request("POST", "/auth/link", json=body)
-        return (data or {}).get("url", "")
+        return (data or {}).get("link") or (data or {}).get("url", "")
 
     # ---- facettes --------------------------------------------------------
 
@@ -560,6 +569,17 @@ class UnipileClientV2:
 
     # ---- posts / engagement ---------------------------------------------
 
+    def _member_id(self, identifier: str) -> str:
+        """Résout un identifiant de membre vers le **provider_id (URN, `ACoAA…`)**
+        attendu par les endpoints posts/comments/reactions v2 : le slug public y
+        renvoie 400 « Invalid User ID » (delta v2 relevé en live 2026-07-06). URN
+        déjà opaque → tel quel ; slug → résolu via le profil (1 appel)."""
+        ident = str(identifier).strip()
+        if ident.startswith(("ACoA", "urn:")):
+            return ident
+        prof = self.get_profile(ident)
+        return str((prof or {}).get("provider_id") or (prof or {}).get("id") or ident)
+
     def list_member_posts(self, identifier: str, cursor: Optional[str] = None,
                           limit: Optional[int] = None) -> dict:
         params: dict[str, Any] = {}
@@ -568,7 +588,7 @@ class UnipileClientV2:
         if limit:
             params["limit"] = limit
         return self._norm(self._request(
-            "GET", self._acct(f"/users/{quote(identifier, safe='')}/posts"),
+            "GET", self._acct(f"/users/{quote(self._member_id(identifier), safe='')}/posts"),
             params=params,
         ))
 
@@ -709,7 +729,7 @@ class UnipileClientV2:
         if limit:
             params["limit"] = limit
         return self._norm(self._request(
-            "GET", self._acct(f"/users/{quote(identifier, safe='')}/comments"),
+            "GET", self._acct(f"/users/{quote(self._member_id(identifier), safe='')}/comments"),
             params=params,
         ))
 
@@ -722,7 +742,7 @@ class UnipileClientV2:
         if limit:
             params["limit"] = limit
         return self._norm(self._request(
-            "GET", self._acct(f"/users/{quote(identifier, safe='')}/reactions"),
+            "GET", self._acct(f"/users/{quote(self._member_id(identifier), safe='')}/reactions"),
             params=params,
         ))
 
