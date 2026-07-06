@@ -431,9 +431,11 @@ class UnipileClientV2:
 
     def list_relations(self, cursor: Optional[str] = None,
                        limit: Optional[int] = None) -> dict:
+        from .client import cursor_with_limit
         params: dict[str, Any] = {}
         if cursor:
-            params["cursor"] = cursor
+            # Le limit de l'appel prime sur celui figé dans le cursor (#179).
+            params["cursor"] = cursor_with_limit(cursor, limit) if limit else cursor
         if limit:
             params["limit"] = limit
         return self._norm(self._request(

@@ -36,6 +36,26 @@ logger = logging.getLogger(__name__)
 FEED_QUERY_ID = "voyagerFeedDashMainFeed.7a50ef8ba5a7865c23ad5df46f735709"
 
 
+def cursor_with_limit(cursor: str, limit: int) -> str:
+    """Réécrit `limit` DANS un cursor Unipile (base64 de `{limit, startIndex}`).
+
+    L'API Unipile fige le `limit` du 1er appel dans le cursor et IGNORE ensuite
+    le param `limit` (feedback #179 : une pagination entamée à limit=3 restait
+    bloquée à 3/page — des centaines d'appels pour un réseau entier). Le limit
+    de l'appel courant doit primer. Forme de cursor inattendue (non-base64,
+    non-JSON, pas de clé limit) → rendu tel quel, l'API tranche."""
+    import base64
+    import json
+    try:
+        data = json.loads(base64.b64decode(cursor + "=" * (-len(cursor) % 4)))
+        if isinstance(data, dict) and "limit" in data:
+            data["limit"] = int(limit)
+            return base64.b64encode(json.dumps(data).encode()).decode()
+    except Exception:  # noqa: BLE001 — cursor opaque : jamais bloquant
+        pass
+    return cursor
+
+
 class UnipileError(RuntimeError):
     """Erreur API Unipile, message remonté tel quel.
 
@@ -388,10 +408,11 @@ class UnipileClient:
 
     def list_relations(self, cursor: Optional[str] = None,
                        limit: Optional[int] = None) -> dict:
-        """Relations de 1er degré (N1) du compte connecté."""
+        """Relations de 1er degré (N1) du compte connecté. `limit` prime sur le
+        limit figé dans le `cursor` (réécrit, cf. `cursor_with_limit`)."""
         params: dict[str, Any] = {"account_id": self.account_id()}
         if cursor:
-            params["cursor"] = cursor
+            params["cursor"] = cursor_with_limit(cursor, limit) if limit else cursor
         if limit:
             params["limit"] = limit
         return self._request("GET", "/users/relations", params=params)
