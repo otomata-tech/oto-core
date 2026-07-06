@@ -124,7 +124,8 @@ class UnipileClientV2:
                 msg = body.get("detail") or body.get("message") or resp.text
             except ValueError:
                 msg = resp.text or f"{resp.status_code} {resp.reason}"
-            raise UnipileError(self._sanitize(f"Unipile {resp.status_code}: {msg}"))
+            raise UnipileError(self._sanitize(f"Unipile {resp.status_code}: {msg}"),
+                               status_code=resp.status_code)
         if not resp.text:
             return None
         return resp.json()

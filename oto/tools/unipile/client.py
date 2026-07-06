@@ -37,7 +37,17 @@ FEED_QUERY_ID = "voyagerFeedDashMainFeed.7a50ef8ba5a7865c23ad5df46f735709"
 
 
 class UnipileError(RuntimeError):
-    """Erreur API Unipile, message remonté tel quel."""
+    """Erreur API Unipile, message remonté tel quel.
+
+    `status_code` = code HTTP amont quand l'erreur vient d'une réponse Unipile
+    (même contrat que `oto.tools.common.UpstreamHTTPError` : permet aux
+    consommateurs de router un 4xx comme erreur gérée, pas un bug), None sinon
+    (erreur réseau, config, identity mismatch).
+    """
+
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 class UnipileClient:
@@ -73,7 +83,8 @@ class UnipileClient:
                 msg = body.get("detail") or body.get("message") or resp.text
             except ValueError:
                 msg = resp.text or f"{resp.status_code} {resp.reason}"
-            raise UnipileError(f"Unipile {resp.status_code}: {msg}")
+            raise UnipileError(f"Unipile {resp.status_code}: {msg}",
+                               status_code=resp.status_code)
         if not resp.text:
             return None
         return resp.json()

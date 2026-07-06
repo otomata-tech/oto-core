@@ -1,5 +1,5 @@
 """Zoho CRM API client."""
 
-from .client import ZohoClient
+from .client import ZohoAuthError, ZohoClient
 
-__all__ = ["ZohoClient"]
+__all__ = ["ZohoAuthError", "ZohoClient"]

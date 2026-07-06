@@ -16,6 +16,7 @@ import requests
 
 from ...config import require_secret, get_secret
 from ..common import raise_for_upstream
+from ..zoho import ZohoAuthError
 
 
 class ZohoAnalyticsClient:
@@ -65,7 +66,7 @@ class ZohoAnalyticsClient:
         resp.raise_for_status()
         token_data = resp.json()
         if "error" in token_data:
-            raise ValueError(f"Zoho OAuth error: {token_data['error']}")
+            raise ZohoAuthError(f"Zoho OAuth error: {token_data['error']}")
 
         self._access_token = token_data["access_token"]
         self._token_expires_at = time.time() + token_data.get("expires_in", 3600)

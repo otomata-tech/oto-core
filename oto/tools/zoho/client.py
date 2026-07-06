@@ -9,6 +9,18 @@ from ...config import require_secret, get_secret
 from ..common import raise_for_upstream
 
 
+class ZohoAuthError(ValueError):
+    """Refus OAuth Zoho (invalid_client / invalid_code / invalid_grant…).
+
+    Zoho répond HTTP 200 avec l'erreur dans le corps — on porte donc un
+    `status_code` 401 synthétique (contrat `UpstreamHTTPError`) pour que les
+    consommateurs classent ce refus de credential comme erreur gérée, pas un
+    bug. Sous-classe `ValueError` : les `except ValueError` existants tiennent.
+    """
+
+    status_code = 401
+
+
 class ZohoClient:
     API_VERSION = "v7"
 
@@ -57,7 +69,7 @@ class ZohoClient:
         token_data = resp.json()
 
         if "error" in token_data:
-            raise ValueError(f"Zoho OAuth error: {token_data['error']}")
+            raise ZohoAuthError(f"Zoho OAuth error: {token_data['error']}")
 
         self._access_token = token_data["access_token"]
         self._token_expires_at = time.time() + token_data.get("expires_in", 3600)
