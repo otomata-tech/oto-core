@@ -10,6 +10,7 @@ partagent le même socle de paramètres (`q`, `gl`, `hl`, `location`, `num`,
 Requires: requests
 """
 
+import math
 import time
 from typing import Optional, Dict, Any, List
 
@@ -303,6 +304,126 @@ class SerperClient:
         if language:
             payload["hl"] = language
         return self._request("/maps", payload)
+
+    # ----------------------------------------------------------- maps census
+
+    @staticmethod
+    def _grid_anchors(
+        center: str, radius_km: float, grid: int, zoom: int
+    ) -> List[str]:
+        """Pave une zone carrée (center ± radius_km) en `grid`×`grid` ancres
+        `@lat,lng,zoomz`. Conversion km→degrés : 1° lat ≈ 111 km, 1° lng ≈
+        111·cos(lat) km. Une seule ancre si grid ≤ 1."""
+        lat0, lng0 = (float(x) for x in center.split(","))
+        grid = max(1, grid)
+        if grid == 1:
+            offsets = [0.0]
+        else:
+            offsets = [
+                -radius_km + 2 * radius_km * i / (grid - 1) for i in range(grid)
+            ]
+        km_per_deg_lng = 111.0 * max(math.cos(math.radians(lat0)), 1e-6)
+        anchors: List[str] = []
+        for dlat_km in offsets:
+            for dlng_km in offsets:
+                lat = lat0 + dlat_km / 111.0
+                lng = lng0 + dlng_km / km_per_deg_lng
+                anchors.append(f"@{lat:.6f},{lng:.6f},{zoom}z")
+        return anchors
+
+    @staticmethod
+    def _place_key(place: Dict[str, Any]) -> str:
+        """Clé de déduplication stable d'un lieu Maps : id Google si présent
+        (cid > placeId > fid), sinon repli titre+adresse normalisés."""
+        for k in ("cid", "placeId", "fid"):
+            v = place.get(k)
+            if v:
+                return f"{k}:{v}"
+        title = str(place.get("title", "")).strip().lower()
+        address = str(place.get("address", "")).strip().lower()
+        return f"ta:{title}|{address}"
+
+    def census_maps(
+        self,
+        query: str,
+        center: str = None,
+        radius_km: float = 5.0,
+        grid: int = 3,
+        zoom: int = 14,
+        ll_anchors: List[str] = None,
+        max_pages: int = 3,
+        country: str = None,
+        language: str = None,
+    ) -> Dict[str, Any]:
+        """Recensement EXHAUSTIF d'un type de commerce sur une zone.
+
+        `search_maps` plafonne à ~20 résultats/appel et biaise vers le point
+        d'ancrage `ll` → il **sous-compte silencieusement**. Ce recensement
+        supprime les deux défauts côté serveur : il **pave** la zone en une
+        grille d'ancres géographiques, **pagine** chacune, et **déduplique** par
+        id de lieu. Le `count` rendu est donc le total réel dédupliqué.
+
+        Fournir soit `center` "lat,lng" (+ radius_km, grid) pour paver la zone,
+        soit `ll_anchors` explicites (qui priment sur le pavage).
+
+        Args:
+            query: Ce qu'on énumère (ex. "laverie automatique").
+            center: Centre de zone "lat,lng" (requis sauf si ll_anchors).
+            radius_km: Demi-largeur de la zone carrée autour du centre (défaut 5).
+            grid: Densité du pavage grid×grid (défaut 3 → 9 ancres).
+            zoom: Niveau de zoom Maps par ancre (défaut 14).
+            ll_anchors: Ancres "@lat,lng,zoomz" explicites (priment sur le pavage).
+            max_pages: Pages maxi paginées par ancre (défaut 3).
+            country: Code pays (gl).
+            language: Code langue (hl).
+
+        Returns:
+            {query, count, places[], anchors_used, pages_fetched} — `count` =
+            total dédupliqué, à préférer à tout comptage d'un `search_maps` seul.
+        """
+        if not query:
+            raise ValueError("census_maps requires a non-empty query")
+        anchors = ll_anchors or (
+            self._grid_anchors(center, radius_km, grid, zoom) if center else []
+        )
+        if not anchors:
+            raise ValueError(
+                "census_maps requires `center` ('lat,lng') or explicit `ll_anchors`"
+            )
+
+        seen: Dict[str, Dict[str, Any]] = {}
+        order: List[str] = []
+        pages_fetched = 0
+        for anchor in anchors:
+            for page in range(1, max_pages + 1):
+                res = self.search_maps(
+                    query=query, ll=anchor, num=100, page=page,
+                    country=country, language=language,
+                )
+                pages_fetched += 1
+                places = res.get("places") or []
+                if not places:
+                    break
+                new = 0
+                for p in places:
+                    key = self._place_key(p)
+                    if key in seen:
+                        continue
+                    seen[key] = p
+                    order.append(key)
+                    new += 1
+                # Page entièrement déjà vue → ancre épuisée ou recouvrante,
+                # inutile de paginer plus loin (les pages profondes divergent).
+                if new == 0:
+                    break
+
+        return {
+            "query": query,
+            "count": len(order),
+            "places": [seen[k] for k in order],
+            "anchors_used": len(anchors),
+            "pages_fetched": pages_fetched,
+        }
 
     # -------------------------------------------------------------- reviews
 
