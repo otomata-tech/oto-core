@@ -414,12 +414,26 @@ class UnipileClientV2:
 
     # ---- messagerie ------------------------------------------------------
 
+    def list_inboxes(self) -> dict:
+        """Inboxes du compte (v2 : `GET /v2/{account}/inboxes`). LinkedIn classic :
+        `CLASSIC_PRIMARY` (principale), `CLASSIC_ARCHIVED`, `CLASSIC_SPAM`,
+        `CLASSIC_JOBS`, `CLASSIC_INMAIL`, `CLASSIC_STARRED`."""
+        return self._norm(self._request("GET", self._acct("/inboxes")))
+
     def list_chats(self, limit: int = 20, cursor: Optional[str] = None,
-                   with_attendee_names: bool = False) -> dict:
+                   with_attendee_names: bool = False,
+                   inbox: str = "CLASSIC_PRIMARY") -> dict:
+        """Fils de messagerie. v2 : les chats sont rangés **par inbox**
+        (`GET /v2/{account}/inboxes/{inbox}/chats`) — l'ancien `/chats` renvoie
+        501 « Use List inbox Chats endpoint » pour LinkedIn (delta live 2026-07-06).
+        `inbox` défaut = `CLASSIC_PRIMARY` (boîte principale) ; autres inboxes via
+        `list_inboxes`."""
         params: dict[str, Any] = {"limit": limit}
         if cursor:
             params["cursor"] = cursor
-        data = self._norm(self._request("GET", self._acct("/chats"), params=params))
+        data = self._norm(self._request(
+            "GET", self._acct(f"/inboxes/{quote(inbox, safe='')}/chats"),
+            params=params))
         if with_attendee_names:
             self._annotate_chat_attendees(data)
         return data

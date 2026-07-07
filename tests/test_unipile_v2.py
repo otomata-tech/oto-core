@@ -58,12 +58,23 @@ def test_account_id_in_path_and_norm():
     out = c.list_chats(limit=5, cursor="C")
     method, path, params, json = rec[0]
     assert method == "GET"
-    assert path == "/acc/chats"          # account_id en path
+    # v2 : les chats sont rangés par inbox (défaut CLASSIC_PRIMARY), account en path.
+    assert path == "/acc/inboxes/CLASSIC_PRIMARY/chats"
     assert params == {"limit": 5, "cursor": "C"}
     # normalisation : items/cursor ajoutés, natifs conservés
     assert out["items"] == [{"id": 1}]
     assert out["cursor"] == "N"
     assert out["data"] == [{"id": 1}] and out["next_cursor"] == "N"
+
+
+def test_list_chats_custom_inbox_and_inboxes_path():
+    rec = []
+    c = _client(canned={"data": []}, recorder=rec)
+    c.list_chats(inbox="CLASSIC_INMAIL")
+    assert rec[0][1] == "/acc/inboxes/CLASSIC_INMAIL/chats"
+    rec.clear()
+    c.list_inboxes()
+    assert rec[0][1] == "/acc/inboxes"
 
 
 # ---- profils : garde anti-mismatch (#153) -------------------------------
