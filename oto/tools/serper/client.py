@@ -480,6 +480,59 @@ class SerperClient:
             payload["hl"] = language
         return self._request("/reviews", payload)
 
+    def reviews_all(
+        self,
+        cid: str = None,
+        fid: str = None,
+        place_id: str = None,
+        query: str = None,
+        sort_by: str = None,
+        topic_id: str = None,
+        max_reviews: int = 200,
+        country: str = None,
+        language: str = None,
+    ) -> Dict[str, Any]:
+        """TOUS les avis d'un lieu — pagine `nextPageToken` jusqu'à épuisement.
+
+        `search_reviews` ne rend qu'une page (~10 avis) : un seul appel
+        sous-représente silencieusement les avis d'un lieu (le total réel vit
+        dans `ratingCount` côté lieu, pas ici). Cette méthode suit le curseur
+        `nextPageToken` jusqu'à ce qu'il n'y ait plus de page, ou jusqu'au
+        plafond `max_reviews` (borne le coût — un lieu peut avoir des milliers
+        d'avis).
+
+        Identifier le lieu par `cid`/`fid`/`place_id` ou `query` (comme
+        search_reviews). Returns {count, reviews[], pages_fetched, truncated}.
+        `truncated=True` = le plafond a coupé avant épuisement.
+        """
+        collected: List[Dict[str, Any]] = []
+        token: Optional[str] = None
+        seen_tokens: set = set()
+        pages = 0
+        while len(collected) < max_reviews:
+            res = self.search_reviews(
+                cid=cid, fid=fid, place_id=place_id, query=query,
+                sort_by=sort_by, topic_id=topic_id, next_page_token=token,
+                country=country, language=language,
+            )
+            pages += 1
+            reviews = res.get("reviews") or []
+            if not reviews:
+                break
+            collected.extend(reviews)
+            token = res.get("nextPageToken")
+            # Plus de curseur, ou curseur qui se répète (garde anti-boucle).
+            if not token or token in seen_tokens:
+                token = None
+                break
+            seen_tokens.add(token)
+        return {
+            "count": len(collected[:max_reviews]),
+            "reviews": collected[:max_reviews],
+            "pages_fetched": pages,
+            "truncated": len(collected) >= max_reviews and bool(token),
+        }
+
     # ------------------------------------------------------------- shopping
 
     def search_shopping(
