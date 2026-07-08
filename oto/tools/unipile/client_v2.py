@@ -500,6 +500,7 @@ class UnipileClientV2:
         text: str,
         chat_id: Optional[str] = None,
         attendee_id: Optional[str] = None,
+        inbox: str = "CLASSIC_PRIMARY",
     ) -> dict:
         if chat_id:
             return self._request(
@@ -508,9 +509,12 @@ class UnipileClientV2:
             )
         if not attendee_id:
             raise UnipileError("send_message : chat_id ou attendee_id requis.")
-        # v2 : nouveau fil via `POST /v2/{account}/chats/send`, `users_ids`.
+        # v2 : pour un provider à INBOX (LinkedIn), le nouveau fil passe par l'inbox —
+        # `POST /v2/{account}/inboxes/{inbox}/chats/send`, `users_ids`. Le `/chats/send`
+        # générique renvoie 501 « Use Start a Chat in the given inbox endpoint for this
+        # provider » (relevé live 2026-07-08 — même modèle inbox que list_chats). Signal #199/#200.
         return self._request(
-            "POST", self._acct("/chats/send"),
+            "POST", self._acct(f"/inboxes/{quote(inbox, safe='')}/chats/send"),
             json={"users_ids": [attendee_id], "text": text},
         )
 
