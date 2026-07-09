@@ -23,6 +23,9 @@ import requests
 from ...config import get_secret, require_secret
 
 DEFAULT_DSN = "api25.unipile.com:15555"
+# (connect, read) en secondes — borne le blocage : un socket amont muet faisait
+# pendre l'appel jusqu'au cutoff 300s du client MCP (unipile_me, #114).
+_REQUEST_TIMEOUT = (10, 120)
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +99,8 @@ class UnipileClient:
         json: Optional[dict] = None,
     ) -> Any:
         url = f"{self.base_url}{path}"
-        resp = self.session.request(method, url, params=params, json=json)
+        resp = self.session.request(
+            method, url, params=params, json=json, timeout=_REQUEST_TIMEOUT)
         if resp.status_code >= 400:
             try:
                 body = resp.json()

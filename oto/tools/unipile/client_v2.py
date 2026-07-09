@@ -44,7 +44,7 @@ from urllib.parse import quote
 import requests
 
 from ...config import get_secret, require_secret
-from .client import DEFAULT_DSN, UnipileError, parse_feed
+from .client import DEFAULT_DSN, UnipileError, _REQUEST_TIMEOUT, parse_feed
 
 logger = logging.getLogger(__name__)
 
@@ -125,7 +125,8 @@ class UnipileClientV2:
     ) -> Any:
         url = f"{self.base_url}{path}"
         try:
-            resp = self.session.request(method, url, params=params, json=json)
+            resp = self.session.request(
+                method, url, params=params, json=json, timeout=_REQUEST_TIMEOUT)
         except requests.RequestException as e:
             # DNS/timeout/reset : erreur stable au lieu de fuiter net::ERR_* (#177).
             raise UnipileError(
