@@ -1,8 +1,9 @@
-"""Client du connecteur `http` générique — appel HTTP lecture seule multi-auth.
+"""Client du connecteur `http` générique — appel HTTP multi-méthode, multi-auth.
 
-Un simple « nœud HTTP » (comme un webhook sortant / le nœud HTTP Request de
-n8n) : injecte le mode d'auth configuré (bearer / clé en header ou query / basic /
-oauth2 client-credentials) et forwarde un GET vers l'API cible.
+Un simple « nœud HTTP » (comme le nœud HTTP Request de n8n / une action Zapier) :
+injecte le mode d'auth configuré (bearer / clé en header ou query / basic /
+oauth2 client-credentials) et forwarde la méthode voulue (GET par défaut ; POST /
+PUT / PATCH / DELETE avec un corps JSON) vers l'API cible.
 
 La protection SSRF ne vit PAS ici : comme dans les produits du marché (Zapier,
 Make, n8n, GPT Actions…), le trafic sortant initié par un tenant est filtré au
@@ -164,11 +165,19 @@ def build_auth(mode: str, fields: dict) -> UpstreamAuth:
 
 # --- forward -------------------------------------------------------------------
 
-class HttpConnectorClient:
-    """Nœud HTTP : (base_url, auth_mode, fields) → `.get(path, params)`.
+METHODS = ("GET", "POST", "PUT", "PATCH", "DELETE")
 
-    Injecte l'auth, GET, retry unique après ré-auth sur 401. Lève `ValueError` sur
-    config invalide (schéma non http(s), mode/champ manquant)."""
+
+class HttpConnectorClient:
+    """Nœud HTTP : (base_url, auth_mode, fields) → `.request(method, path, …)`.
+
+    Injecte l'auth, forwarde la méthode (GET/POST/PUT/PATCH/DELETE), retry unique
+    après ré-auth sur 401. `.get()`/`.post()` = raccourcis. Lève `ValueError` sur
+    config invalide (schéma non http(s), mode/champ/méthode invalide).
+
+    Comme le nœud HTTP de n8n/Make : les méthodes d'écriture sont transportées ;
+    la responsabilité de ce qu'elles font est celle de l'API cible (et, pour un
+    bridge en aval, de SA propre allowlist)."""
 
     def __init__(self, base_url: str, auth_mode: str, fields: dict, *, timeout: int = 45):
         base_url = (base_url or "").strip().rstrip("/")
@@ -186,16 +195,37 @@ class HttpConnectorClient:
             self._session = s
         return self._session
 
-    def get(self, path: str, params: dict | None = None) -> dict:
+    def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        params: dict | None = None,
+        json: dict | list | None = None,
+    ) -> dict:
+        method = (method or "").strip().upper()
+        if method not in METHODS:
+            raise ValueError(f"méthode invalide: {method!r} (attendu: {'|'.join(METHODS)})")
         if not path.startswith("/"):
             raise ValueError("path doit commencer par / (relatif à base_url)")
         s = self._ready()
         url = self._base_url + path
-        merged = {**(params or {}), **self._auth.query_params()}
-        r = s.get(url, params=merged or None, timeout=self._timeout)
+
+        def _send():
+            merged = {**(params or {}), **self._auth.query_params()}
+            return s.request(method, url, params=merged or None, json=json,
+                             timeout=self._timeout)
+
+        r = _send()
         if r.status_code == 401:
             self._auth.refresh(s)
-            merged = {**(params or {}), **self._auth.query_params()}
-            r = s.get(url, params=merged or None, timeout=self._timeout)
+            r = _send()
         r.raise_for_status()
-        return r.json()
+        return r.json() if r.content else {}
+
+    def get(self, path: str, params: dict | None = None) -> dict:
+        return self.request("GET", path, params=params)
+
+    def post(self, path: str, json: dict | list | None = None,
+             params: dict | None = None) -> dict:
+        return self.request("POST", path, params=params, json=json)
