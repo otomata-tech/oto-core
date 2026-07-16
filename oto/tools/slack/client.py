@@ -438,15 +438,41 @@ class SlackClient:
         """Get file metadata (requires files:read scope)."""
         return self._request("GET", "files.info", params={"file": file_id})
 
-    def download_file(self, file_id: str, dest: str) -> str:
-        """Download a Slack file to a local path.
-
-        Uses the user token (files in private channels / DMs need user-level access).
-        Returns the destination path.
-        """
+    def _file_source(self, file_id: str) -> tuple:
+        """`(url_private, token, file_meta)` pour un file id. Le **user token**
+        prime (fichiers de DM / canaux privés = accès user-level), repli bot.
+        Requiert `files:read`."""
         info = self.file_info(file_id)
-        url = info["file"]["url_private_download"]
+        meta = info.get("file", {})
+        url = meta.get("url_private_download") or meta.get("url_private")
+        if not url:
+            raise SlackError("file_not_found")
         token = self.user_token or self.bot_token
+        return url, token, meta
+
+    def fetch_file(self, file_id: str) -> Dict[str, Any]:
+        """Récupère les OCTETS + métadonnées d'un fichier Slack par son id (issu
+        du `files[]` d'un message) — usage en mémoire (rendu agent).
+
+        Returns `{data: bytes, filename, mimetype}`. Pour un stream vers disque,
+        voir `download_file`.
+        """
+        url, token, meta = self._file_source(file_id)
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+        resp.raise_for_status()
+        return {
+            "data": resp.content,
+            "filename": meta.get("name") or meta.get("title") or file_id,
+            "mimetype": meta.get("mimetype") or "application/octet-stream",
+        }
+
+    def download_file(self, file_id: str, dest: str) -> str:
+        """Download a Slack file to a local path (streaming). Returns the path.
+
+        Uses the user token (files in private channels / DMs need user-level
+        access), falling back to the bot token.
+        """
+        url, token, _ = self._file_source(file_id)
         resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, stream=True)
         resp.raise_for_status()
         with open(dest, "wb") as f:

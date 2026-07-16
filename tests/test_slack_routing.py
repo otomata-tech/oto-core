@@ -77,6 +77,48 @@ def test_user_only_falls_through_to_user():
     assert seen["as_user"] is True
 
 
+def test_fetch_file_prefers_user_token_and_returns_bytes(monkeypatch):
+    c = SlackClient(bot_token="xoxb-1", user_token="xoxp-1")
+    c.file_info = lambda fid: {"file": {
+        "url_private_download": "https://files.slack.com/x",
+        "name": "plan.md", "mimetype": "text/markdown"}}
+    seen = {}
+
+    class Resp:
+        content = b"# plan"
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, headers=None, **kw):
+        seen["url"] = url
+        seen["auth"] = headers["Authorization"]
+        return Resp()
+
+    monkeypatch.setattr("oto.tools.slack.client.requests.get", fake_get)
+    blob = c.fetch_file("F1")
+    assert blob == {"data": b"# plan", "filename": "plan.md", "mimetype": "text/markdown"}
+    assert seen["url"] == "https://files.slack.com/x"
+    assert seen["auth"] == "Bearer xoxp-1"      # user token prime
+
+
+def test_fetch_file_falls_back_to_bot_token(monkeypatch):
+    c = SlackClient(bot_token="xoxb-1", user_token="xoxp-1")
+    c.user_token = None
+    c.file_info = lambda fid: {"file": {"url_private": "https://files.slack.com/y", "name": "a.png"}}
+    seen = {}
+
+    class Resp:
+        content = b"\x89PNG"
+        def raise_for_status(self):
+            return None
+
+    monkeypatch.setattr("oto.tools.slack.client.requests.get",
+                        lambda url, headers=None, **kw: (seen.update(auth=headers["Authorization"]) or Resp()))
+    blob = c.fetch_file("F2")
+    assert blob["mimetype"] == "application/octet-stream"   # défaut si absent
+    assert seen["auth"] == "Bearer xoxb-1"
+
+
 def test_explicit_as_user_overrides_routing():
     c = SlackClient(bot_token="xoxb-1", user_token="xoxp-1")
     seen = _capture(c)
