@@ -1,9 +1,10 @@
-"""Tests du client Unipile **API v2** (`client_v2.UnipileClientV2`).
+"""Tests du client Unipile (`client.UnipileClient`, API v2 — seul client).
 
 Verrouille : (1) les paths/params/corps v2 (account_id en path, endpoints
 réorganisés), (2) la normalisation d'enveloppe `data/next_cursor → items/cursor`,
 (3) la **garde anti-mismatch** identifier↔réponse (feedback #153), (4) le mapping
-d'erreurs réseau propre + caviardage de l'account_id (#177/#178), (5) la factory.
+d'erreurs réseau propre + caviardage de l'account_id (#177/#178), (5) la factory,
+(6) l'enrichissement attendee des fils + `resolve_attendee_names`.
 
 Aucun réseau : `_request` est monkeypatché pour capturer (method, path, params,
 json) et rendre une réponse canned.
@@ -12,19 +13,15 @@ json) et rendre une réponse canned.
 import pytest
 import requests
 
-from oto.tools.unipile import (
-    UnipileClient,
-    UnipileClientV2,
-    make_unipile_client,
-)
+from oto.tools.unipile import UnipileClient, make_unipile_client
 from oto.tools.unipile.client import UnipileError
 
 
 def _client(canned=None, recorder=None):
-    """Client v2 avec `_request` stubé. `canned` = valeur rendue (ou callable
+    """Client avec `_request` stubé. `canned` = valeur rendue (ou callable
     `(method, path, params, json) -> value`). `recorder` = liste qui reçoit les
     tuples d'appel."""
-    c = UnipileClientV2(api_key="k", account_id="acc")
+    c = UnipileClient(api_key="k", account_id="acc")
 
     def fake(method, path, params=None, json=None):
         if recorder is not None:
@@ -37,15 +34,30 @@ def _client(canned=None, recorder=None):
     return c
 
 
+def _seq_client(responses):
+    """Client stubé par SÉQUENCE : `responses` = liste de (method, path, payload)
+    matchés par (method, path). Journalise les appels dans `c._calls`."""
+    c = UnipileClient(api_key="k", account_id="acc")
+    calls: list[dict] = []
+
+    def fake(method, path, params=None, json=None):
+        calls.append({"method": method, "path": path, "params": params or {}})
+        for i, (m, p, payload) in enumerate(responses):
+            if m == method and p == path:
+                responses.pop(i)
+                return payload
+        raise AssertionError(f"appel inattendu : {method} {path}")
+
+    c._request = fake  # type: ignore[method-assign]
+    c._calls = calls
+    return c
+
+
 # ---- factory -------------------------------------------------------------
 
-def test_factory_selects_version():
-    assert isinstance(make_unipile_client(api_key="k", api_version="v2"),
-                      UnipileClientV2)
-    assert isinstance(make_unipile_client(api_key="k", api_version="2"),
-                      UnipileClientV2)
+def test_factory_builds_client():
     assert isinstance(make_unipile_client(api_key="k"), UnipileClient)
-    assert isinstance(make_unipile_client(api_key="k", api_version="v1"),
+    assert isinstance(make_unipile_client(api_key="k", account_id="acc"),
                       UnipileClient)
 
 
@@ -251,7 +263,8 @@ def test_send_message_existing_vs_new_chat():
     assert rec[0][1] == "/acc/chats/CH1/messages/send"
     assert rec[0][3] == {"text": "hello"}
     c.send_message("hi", attendee_id="ACoAAA")
-    assert rec[1][1] == "/acc/chats/send"
+    # v2 : nouveau fil LinkedIn via l'inbox (le /chats/send générique → 501, #199/#200).
+    assert rec[1][1] == "/acc/inboxes/CLASSIC_PRIMARY/chats/send"
     assert rec[1][3] == {"users_ids": ["ACoAAA"], "text": "hi"}
 
 
@@ -304,7 +317,7 @@ def test_search_companies_path():
 # ---- erreurs propres (#177/#178) ----------------------------------------
 
 def test_network_error_mapped_and_account_sanitized():
-    c = UnipileClientV2(api_key="k", account_id="acc-SECRET")
+    c = UnipileClient(api_key="k", account_id="acc-SECRET")
 
     def boom(*a, **k):
         raise requests.exceptions.ConnectionError("net::ERR_NAME_NOT_RESOLVED")
@@ -317,7 +330,7 @@ def test_network_error_mapped_and_account_sanitized():
 
 
 def test_http_error_sanitizes_account_id():
-    c = UnipileClientV2(api_key="k", account_id="acc-SECRET")
+    c = UnipileClient(api_key="k", account_id="acc-SECRET")
 
     class Resp:
         status_code = 404
@@ -375,7 +388,7 @@ def _member_stub(recorder):
 
 def test_member_posts_resolves_slug_to_urn():
     rec = []
-    c = UnipileClientV2(api_key="k", account_id="acc")
+    c = UnipileClient(api_key="k", account_id="acc")
     c._request = _member_stub(rec)  # type: ignore[method-assign]
     c.list_member_posts("john-doe")
     paths = [p for _, p, _, _ in rec]
@@ -385,8 +398,82 @@ def test_member_posts_resolves_slug_to_urn():
 
 def test_member_reactions_urn_skips_profile_lookup():
     rec = []
-    c = UnipileClientV2(api_key="k", account_id="acc")
+    c = UnipileClient(api_key="k", account_id="acc")
     c._request = _member_stub(rec)  # type: ignore[method-assign]
     c.list_member_reactions("ACoAAB999")              # déjà un URN
     paths = [p for _, p, _, _ in rec]
     assert paths == ["/acc/users/ACoAAB999/reactions"]  # aucune résolution de profil
+
+
+# ---- enrichissement attendee des fils (best-effort) ---------------------
+# v2 : chats sous `/acc/inboxes/{inbox}/chats`, carnet de contacts sous `/acc/contacts`.
+
+_CHATS = {
+    "items": [
+        {"id": "c1", "name": None, "attendee_provider_id": "ACo111"},
+        {"id": "c2", "name": "Groupe X", "attendee_provider_id": None},
+        {"id": "c3", "name": None, "attendee_provider_id": "ACo333"},
+    ]
+}
+
+_CONTACTS_PAGE = {
+    "items": [
+        {"provider_id": "ACo111", "name": "Jane Doe",
+         "profile_url": "https://linkedin.com/in/jane",
+         "specifics": {"occupation": "CEO at Acme"}},
+        {"provider_id": "ACo333", "name": "John Smith", "specifics": {}},
+    ],
+    "cursor": None,
+}
+
+
+def test_chats_enriched_with_attendee_names():
+    c = _seq_client([
+        ("GET", "/acc/inboxes/CLASSIC_PRIMARY/chats", _CHATS),
+        ("GET", "/acc/contacts", _CONTACTS_PAGE),
+    ])
+    out = c.list_chats(limit=20, with_attendee_names=True)
+    by_id = {it["id"]: it for it in out["items"]}
+    assert by_id["c1"]["attendee_name"] == "Jane Doe"
+    assert by_id["c1"]["attendee_headline"] == "CEO at Acme"
+    assert by_id["c1"]["attendee_profile_url"] == "https://linkedin.com/in/jane"
+    assert by_id["c3"]["attendee_name"] == "John Smith"
+    # fil de groupe sans attendee_provider_id : intact
+    assert "attendee_name" not in by_id["c2"]
+    # le `name` brut n'est PAS réécrit (exposer le brut)
+    assert by_id["c1"]["name"] is None
+
+
+def test_chats_default_is_raw_no_extra_call():
+    c = _seq_client([("GET", "/acc/inboxes/CLASSIC_PRIMARY/chats", {"items": [
+        {"id": "c1", "name": None, "attendee_provider_id": "ACo111"}]})])
+    out = c.list_chats(limit=20)
+    assert "attendee_name" not in out["items"][0]
+    assert len(c._calls) == 1  # pas d'appel /contacts
+
+
+def test_chats_enrichment_failure_still_returns_list():
+    c = _seq_client([("GET", "/acc/inboxes/CLASSIC_PRIMARY/chats", {"items": [
+        {"id": "c1", "name": None, "attendee_provider_id": "ACo111"}]})])
+    # tout appel /contacts lèvera (aucune réponse stubée) → best-effort
+    out = c.list_chats(limit=20, with_attendee_names=True)
+    assert out["items"][0]["id"] == "c1"
+    assert "attendee_name" not in out["items"][0]
+
+
+def test_resolve_attendee_names_stops_early_when_all_resolved():
+    page1 = {"items": [{"provider_id": "A", "name": "Ann"}], "cursor": "NEXT"}
+    c = _seq_client([("GET", "/acc/contacts", page1)])
+    out = c.resolve_attendee_names({"A"})
+    assert out["A"]["name"] == "Ann"
+    assert len(c._calls) == 1  # cursor NEXT jamais suivi : tout est résolu
+
+
+def test_resolve_attendee_names_paginates_until_found():
+    page1 = {"items": [{"provider_id": "X", "name": "Xen"}], "cursor": "NEXT"}
+    page2 = {"items": [{"provider_id": "B", "name": "Bob"}], "cursor": None}
+    c = _seq_client([("GET", "/acc/contacts", page1), ("GET", "/acc/contacts", page2)])
+    out = c.resolve_attendee_names({"B"})
+    assert out["B"]["name"] == "Bob"
+    assert len(c._calls) == 2
+    assert c._calls[1]["params"]["cursor"] == "NEXT"

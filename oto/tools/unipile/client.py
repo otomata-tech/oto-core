@@ -1,19 +1,48 @@
-"""Unipile API client — hosted LinkedIn search / scrape / messaging.
+"""Unipile API client — hosted LinkedIn search / scrape / messaging (API v2).
+
+Unipile maintient la session LinkedIn côté serveur (vrai Chrome + proxy
+résidentiel), ce qui contourne les deux contraintes du browser local : empreinte
+TLS et isolation de session (le cookie ne vit pas sur notre IP datacenter, donc
+n'expose ni ne déconnecte la session de l'utilisateur). Cf. oto-mcp#5.
 
 Requires: requests
 
 Secrets (résolus via oto.config) :
 - UNIPILE_API_KEY            (requis) — clé X-API-KEY du compte Unipile
-- UNIPILE_DSN                (def. api25.unipile.com:15555) — host:port de l'instance
+- UNIPILE_DSN                (def. api.unipile.com) — host de l'instance
 - UNIPILE_LINKEDIN_ACCOUNT_ID (optionnel) — sinon, 1er compte LINKEDIN connecté
 
-Doctrine de surface : un seul atome de recherche (`search`) qui résout lui-même
-les facettes employeur/localisation par nom — la page company LinkedIn (ex.
-79066705) n'est PAS un id de facette people-search ; il faut passer par
-/linkedin/search/parameters. Le client masque ce gotcha.
+Spécificités API v2 (par rapport à l'ancienne API v1, retirée) :
+- **base** : `https://{dsn}/v2`.
+- **`account_id` dans le PATH** (`/v2/{account_id}/…`), plus en query param — donc
+  ne fuite plus dans les query strings, mais peut apparaître dans une URL d'erreur
+  → on le **caviarde** dans les messages (`_sanitize`, feedback oto #178).
+- **enveloppe de liste** `{data, total_count, next_cursor}`. On **normalise** chaque
+  réponse de liste vers `items`/`cursor` EN PLUS de garder `data`/`next_cursor` →
+  l'aval oto-mcp (feed sync, wrappers, attendus de l'agent) reste stable.
+- **surface éclatée** : search people/companies séparés + par produit
+  (classic/recruiter/sales-navigator) ; invitations = `users/me/relation-requests` ;
+  attendees d'un fil = `participants` ; réactions de message sous le chat ;
+  solde InMail = `inmail-credits`.
+
+Fixes feedback fold-in (au-delà de l'API brute) :
+- **garde anti-mismatch** identifier↔réponse sur `get_profile`/`get_company`
+  (feedback #144-149/#153 : sous concurrence, l'API a rendu le profil d'un AUTRE
+  membre / un CompanyProfile à la place). On vérifie que l'objet rendu correspond
+  bien au type ET à l'identifiant demandés, sinon `UnipileError` **actionnable et
+  retryable** — jamais de donnée fausse renvoyée en silence.
+- **erreurs réseau propres** : les exceptions `requests` (DNS/timeout) sont mappées
+  en `UnipileError` stable au lieu de fuiter `net::ERR_NAME_NOT_RESOLVED` (#177).
+- **résolution de slug tolérante** sur `get_company` (#176) : un nom de marque
+  passé comme slug (`mooniz`) qui tombe en 404 est retenté via une recherche
+  société → `public_identifier` canonique (`mooniz1`) ; échec → 404 propre
+  enrichi des candidats proches, jamais l'erreur brute.
 """
 
+from __future__ import annotations
+
 import logging
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
 from urllib.parse import quote
@@ -22,21 +51,28 @@ import requests
 
 from ...config import get_secret, require_secret
 
-DEFAULT_DSN = "api25.unipile.com:15555"
+logger = logging.getLogger(__name__)
+
+DEFAULT_DSN = "api.unipile.com"
 # (connect, read) en secondes — borne le blocage : un socket amont muet faisait
 # pendre l'appel jusqu'au cutoff 300s du client MCP (unipile_me, #114).
 _REQUEST_TIMEOUT = (10, 120)
 
-logger = logging.getLogger(__name__)
-
 # Feed d'accueil LinkedIn : LinkedIn n'expose AUCUN endpoint feed côté API
-# Unipile. Le seul chemin est la Magic Route raw data d'Unipile (POST
-# /api/v1/linkedin) qui relaie une requête Voyager arbitraire avec la session
-# du compte connecté. ⚠️ Voyager n'est PAS contractuel : ce queryId GraphQL et
+# Unipile. Le seul chemin est la Magic Route Voyager, exposée en v2 comme le proxy
+# générique `POST /v2/{account_id}/linkedin/` (proxyRequest) : on relaie une
+# requête Voyager brute. ⚠️ Voyager n'est PAS contractuel : ce queryId GraphQL et
 # le schéma JSON peuvent casser quand LinkedIn fait évoluer son API interne
 # (capture devtools sur linkedin.com/feed pour le rafraîchir). Source du queryId :
 # https://developer.unipile.com/docs/get-raw-data-example
 FEED_QUERY_ID = "voyagerFeedDashMainFeed.7a50ef8ba5a7865c23ad5df46f735709"
+
+# Préfixe de path par produit LinkedIn (search & co.).
+_API_PREFIX = {
+    "classic": "/linkedin/search",
+    "sales_navigator": "/linkedin/sales-navigator/search",
+    "recruiter": "/linkedin/recruiter/search",
+}
 
 
 def cursor_with_limit(cursor: str, limit: int) -> str:
@@ -59,6 +95,32 @@ def cursor_with_limit(cursor: str, limit: int) -> str:
     return cursor
 
 
+def _sections_param(sections: str) -> Optional[list[str]]:
+    """Map la valeur `sections` vers le param v2 `with_sections`.
+
+    Entrée : `"*"` (tout) ou une liste séparée par virgules de noms nus
+    (`experience`, `education`…). v2 : `with_sections=linkedin_<nom>` (et
+    `linkedin_*` = tout). `"*"`/vide → None (défaut serveur = tout)."""
+    s = (sections or "").strip()
+    if not s or s in ("*", "linkedin_*"):
+        return None
+    out: list[str] = []
+    for part in s.split(","):
+        p = part.strip()
+        if not p:
+            continue
+        out.append(p if p.startswith("linkedin_") else f"linkedin_{p}")
+    return out or None
+
+
+def _slug_from_company_url(url: str) -> Optional[str]:
+    """Extrait le slug d'une URL LinkedIn société (`…/company/<slug>[/…]`)."""
+    if not url:
+        return None
+    m = re.search(r"/company/([^/?#]+)", url)
+    return m.group(1) if m else None
+
+
 class UnipileError(RuntimeError):
     """Erreur API Unipile, message remonté tel quel.
 
@@ -74,6 +136,8 @@ class UnipileError(RuntimeError):
 
 
 class UnipileClient:
+    """Client Unipile API v2 — hosted LinkedIn (et autres IM)."""
+
     def __init__(
         self,
         api_key: Optional[str] = None,
@@ -82,7 +146,7 @@ class UnipileClient:
     ):
         self.api_key = api_key or require_secret("UNIPILE_API_KEY")
         self.dsn = dsn or get_secret("UNIPILE_DSN", DEFAULT_DSN)
-        self.base_url = f"https://{self.dsn}/api/v1"
+        self.base_url = f"https://{self.dsn}/v2"
         self._account_id = account_id or get_secret("UNIPILE_LINKEDIN_ACCOUNT_ID")
         self.session = requests.Session()
         self.session.headers.update(
@@ -90,6 +154,14 @@ class UnipileClient:
         )
 
     # ---- transport -------------------------------------------------------
+
+    def _sanitize(self, msg: str) -> str:
+        """Caviarde l'account_id dans un message d'erreur (il vit dans le path v2 →
+        remonterait sinon dans une URL 404, feedback #178)."""
+        acct = self._account_id
+        if acct and isinstance(msg, str):
+            return msg.replace(acct, "<account>")
+        return msg
 
     def _request(
         self,
@@ -99,32 +171,56 @@ class UnipileClient:
         json: Optional[dict] = None,
     ) -> Any:
         url = f"{self.base_url}{path}"
-        resp = self.session.request(
-            method, url, params=params, json=json, timeout=_REQUEST_TIMEOUT)
+        try:
+            resp = self.session.request(
+                method, url, params=params, json=json, timeout=_REQUEST_TIMEOUT)
+        except requests.RequestException as e:
+            # DNS/timeout/reset : erreur stable au lieu de fuiter net::ERR_* (#177).
+            raise UnipileError(
+                self._sanitize(f"Unipile: erreur réseau ({type(e).__name__}).")
+            ) from e
         if resp.status_code >= 400:
             try:
                 body = resp.json()
                 msg = body.get("detail") or body.get("message") or resp.text
             except ValueError:
                 msg = resp.text or f"{resp.status_code} {resp.reason}"
-            raise UnipileError(f"Unipile {resp.status_code}: {msg}",
+            raise UnipileError(self._sanitize(f"Unipile {resp.status_code}: {msg}"),
                                status_code=resp.status_code)
         if not resp.text:
             return None
         return resp.json()
 
+    def _acct(self, sub_path: str) -> str:
+        """Préfixe un sous-chemin par `/{account_id}` (path param v2)."""
+        return f"/{quote(self.account_id(), safe='')}{sub_path}"
+
+    @staticmethod
+    def _norm(data: Any) -> Any:
+        """Normalise une enveloppe de liste v2 `{data, next_cursor, total_count}`
+        vers la forme `items`/`cursor` attendue par l'aval SANS perdre les champs
+        natifs. No-op si `data` n'est pas une enveloppe de liste."""
+        if not isinstance(data, dict):
+            return data
+        if "data" in data and isinstance(data.get("data"), list):
+            data.setdefault("items", data["data"])
+        if "next_cursor" in data:
+            data.setdefault("cursor", data.get("next_cursor"))
+        return data
+
     # ---- accounts --------------------------------------------------------
 
     def list_accounts(self) -> list[dict]:
-        """Comptes connectés (LinkedIn, etc.)."""
-        return self._request("GET", "/accounts").get("items", [])
+        data = self._request("GET", "/accounts")
+        if isinstance(data, dict):
+            return data.get("data") or data.get("items") or []
+        return data or []
 
     def account_id(self) -> str:
-        """Id du compte LinkedIn à utiliser : configuré, sinon 1er LINKEDIN."""
         if self._account_id:
             return self._account_id
         for acc in self.list_accounts():
-            if acc.get("type") == "LINKEDIN":
+            if (acc.get("type") or acc.get("provider")) == "LINKEDIN":
                 self._account_id = acc["id"]
                 return self._account_id
         raise UnipileError(
@@ -132,7 +228,7 @@ class UnipileClient:
             "(et UNIPILE_LINKEDIN_ACCOUNT_ID non défini)."
         )
 
-    # ---- hosted auth (connexion d'un compte LinkedIn par l'utilisateur) ---
+    # ---- hosted auth -----------------------------------------------------
 
     def hosted_auth_link(
         self,
@@ -143,70 +239,46 @@ class UnipileClient:
         failure_redirect_url: Optional[str] = None,
         ttl_minutes: int = 60,
     ) -> str:
-        """Génère une URL d'auth hébergée Unipile (Hosted Auth Wizard).
+        """URL d'auth hébergée (v2 : `POST /v2/auth/link`, createAuthLink).
 
-        L'utilisateur l'ouvre, se connecte à son compte (LinkedIn par défaut) sur
-        la page Unipile — 2FA/checkpoints gérés par Unipile — et au succès Unipile
-        crée le compte et **POST le résultat sur `notify_url`** (webhook) avec
-        l'`account_id`. Ne consomme PAS de credential côté oto : c'est notre clé
-        (compte/abonnement) qui autorise la génération du lien.
-
-        Args:
-            notify_url: webhook qui recevra `{account_id, name, status}` au succès.
-            providers: comptes autorisés (défaut `["LINKEDIN"]`).
-            name: identifiant libre rattaché au compte (souvent le sub de l'user).
-            success_redirect_url / failure_redirect_url: redirections post-flow.
-            ttl_minutes: durée de validité du lien.
-
-        Returns:
-            L'URL hébergée (`https://account.unipile.com/...`).
-        """
+        Schéma v2 : `expires_on` (snake) ; `providers` = liste de codes
+        **minuscules** (`["linkedin"]`) ou `"*"` (tous) ; **un seul** `redirect_uri`
+        (v2 ne sépare plus succès/échec) ; la réponse porte le lien sur **`link`**.
+        `name`/`notify_url` restent acceptés (corrélation webhook du hosted-auth #131)."""
         expires = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
         body: dict[str, Any] = {
             "type": "create",
-            "providers": providers or ["LINKEDIN"],
+            "providers": [str(p).lower() for p in providers] if providers else "*",
             "api_url": f"https://{self.dsn}",
-            "expiresOn": expires.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            "expires_on": expires.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
         }
+        # v2 = un seul redirect_uri (l'échec n'a plus d'URL dédiée) ; on prend le
+        # succès, sinon l'échec en repli.
+        redirect = success_redirect_url or failure_redirect_url
+        if redirect:
+            body["redirect_uri"] = redirect
         if notify_url:
             body["notify_url"] = notify_url
         if name:
             body["name"] = name
-        if success_redirect_url:
-            body["success_redirect_url"] = success_redirect_url
-        if failure_redirect_url:
-            body["failure_redirect_url"] = failure_redirect_url
-        data = self._request("POST", "/hosted/accounts/link", json=body)
-        return (data or {}).get("url", "")
+        data = self._request("POST", "/auth/link", json=body)
+        return (data or {}).get("link") or (data or {}).get("url", "")
 
-    # ---- facettes (employeur / localisation) -----------------------------
+    # ---- facettes --------------------------------------------------------
 
     def resolve_facet(
         self, facet_type: str, keywords: str, limit: int = 100
     ) -> list[dict]:
-        """Résout un nom en ids de facette LinkedIn.
-
-        facet_type ∈ COMPANY | LOCATION | INDUSTRY | SCHOOL | SKILLS ...
-        Retourne [{id, title}, ...]. La page company LinkedIn n'est pas
-        forcément une facette employeur valide — utiliser CE résultat.
-        """
-        params = {
-            "account_id": self.account_id(),
-            "type": facet_type,
-            "keywords": keywords,
-            "limit": limit,
-        }
+        """Résout un nom en ids de facette LinkedIn (v2 :
+        `GET /v2/{account}/linkedin/search/parameters`)."""
+        params = {"type": facet_type, "keywords": keywords, "limit": limit}
         data = self._request(
-            "GET", "/linkedin/search/parameters", params=params
+            "GET", self._acct("/linkedin/search/parameters"), params=params
         )
-        return [
-            {"id": it.get("id"), "title": it.get("title")}
-            for it in (data or {}).get("items", [])
-        ]
+        items = (data or {}).get("data") or (data or {}).get("items") or []
+        return [{"id": it.get("id"), "title": it.get("title")} for it in items]
 
     def _as_facet_ids(self, facet_type: str, values: Optional[list[str]]) -> list[str]:
-        """Chaque valeur : déjà un id numérique → tel quel ; sinon résolue
-        (1er match) en id de facette."""
         if not values:
             return []
         out: list[str] = []
@@ -236,105 +308,183 @@ class UnipileClient:
         advanced_keywords: Optional[dict] = None,
         industry: Optional[dict] = None,
     ) -> dict:
-        """Recherche LinkedIn. `company`/`location`/`industry` acceptent des
-        noms (résolus en facettes) ou des ids numériques.
-
-        Args:
-            keywords: mots-clés (nom, intitulé de poste…).
-            category: "people" ou "companies".
-            company: employeur(s) — noms ou ids de facette.
-            location: localisation(s) — noms ou ids de facette.
-            cursor: curseur de pagination.
-            api: "classic" | "sales_navigator" | "recruiter" (défaut classic).
-                Certains filtres (tenure, langue, role/skills) ne marchent que
-                sur sales_navigator/recruiter et dépendent de l'abonnement.
-            network_distance: degré(s) de relation — [1]=N1, [2]=N2, [3]=N3.
-            url: URL de recherche LinkedIn/Sales Nav collée du navigateur. Si
-                fournie, les autres filtres structurés sont ignorés.
-            advanced_keywords: recherche people ciblée — dict
-                {first_name?, last_name?, title?, company?, school?}.
-            industry: filtre secteur — dict {include?: [...], exclude?: [...]}
-                (noms ou ids de facette).
-
-        Retourne le payload Unipile brut (items + paging + cursor).
-        """
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        """Recherche LinkedIn. `company`/`location`/`industry` = noms (résolus en
+        facettes) ou ids numériques."""
+        prefix = _API_PREFIX.get(api, _API_PREFIX["classic"])
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
 
-        # Recherche par URL collée : mutuellement exclusive des filtres.
+        # Recherche par URL collée : endpoint from-url du produit, corps {url}.
         if url:
-            return self._request(
-                "POST", "/linkedin/search", params=params, json={"url": url}
-            )
+            return self._norm(self._request(
+                "POST", self._acct(prefix), params=params, json={"url": url}
+            ))
 
-        body: dict[str, Any] = {"api": api, "category": category}
+        cat = "companies" if category == "companies" else "people"
+        path = f"{prefix}/{cat}"
+        body: dict[str, Any] = {}
         if keywords:
             body["keywords"] = keywords
         if advanced_keywords:
             ak = {k: v for k, v in advanced_keywords.items() if v}
             if ak:
                 body["advanced_keywords"] = ak
-        company_ids = self._as_facet_ids("COMPANY", company)
         location_ids = self._as_facet_ids("LOCATION", location)
-        if company_ids:
-            body["company"] = company_ids
         if location_ids:
             body["location"] = location_ids
         if industry:
             inc = self._as_facet_ids("INDUSTRY", industry.get("include"))
             exc = self._as_facet_ids("INDUSTRY", industry.get("exclude"))
             if inc or exc:
-                body["industry"] = {"include": inc, "exclude": exc}
-        if network_distance:
+                body["industry"] = inc + exc  # v2 : liste plate d'ids
+        company_ids = self._as_facet_ids("COMPANY", company)
+        if company_ids:
+            # v2 people-search : `current_company` (l'employeur courant) ;
+            # companies-search n'a pas de filtre employeur.
+            if cat == "people":
+                body["current_company"] = company_ids
+        if cat == "people" and network_distance:
             body["network_distance"] = [int(d) for d in network_distance]
-        return self._request(
-            "POST", "/linkedin/search", params=params, json=body
-        )
+        return self._norm(self._request(
+            "POST", self._acct(path), params=params, json=body
+        ))
 
-    # ---- profils / sociétés ---------------------------------------------
+    # ---- profils / sociétés (avec garde anti-mismatch #153) --------------
+
+    @staticmethod
+    def _identity_ok(requested: str, resp: dict, expect_object: str) -> bool:
+        """True si `resp` correspond bien au type ET à l'identifiant demandés.
+        Tolère slug↔id (compare requested à `public_identifier`, `id`,
+        `provider_id`, insensible à la casse)."""
+        if not isinstance(resp, dict):
+            return False
+        obj = resp.get("object")
+        if obj and expect_object and obj != expect_object:
+            return False  # ex. demandé UserProfile, reçu CompanyProfile (#148/#149)
+        req = str(requested).strip().lower()
+        cands = {
+            str(resp.get(k, "")).strip().lower()
+            for k in ("public_identifier", "id", "provider_id", "member_urn")
+        }
+        return req in cands if any(cands) else True  # pas d'id à comparer → on laisse
 
     def get_profile(self, identifier: str, sections: str = "*") -> dict:
-        """Profil complet (carrière, écoles, réseau). `identifier` = public
-        identifier ou provider id. `sections="*"` = tout."""
-        params = {"account_id": self.account_id(), "linkedin_sections": sections}
-        return self._request("GET", f"/users/{quote(identifier, safe='')}", params=params)
+        """Profil complet. `identifier` = public identifier (slug) ou provider id.
 
-    def get_company(self, identifier: str) -> dict:
-        params = {"account_id": self.account_id()}
-        return self._request(
-            "GET", f"/linkedin/company/{quote(identifier, safe='')}", params=params
+        Garde #153 : rejette une réponse qui ne correspond pas au membre demandé
+        (mauvais appariement observé sous concurrence) → `UnipileError` retryable."""
+        params: dict[str, Any] = {}
+        secs = _sections_param(sections)
+        if secs:
+            params["with_sections"] = secs
+        data = self._request(
+            "GET", self._acct(f"/users/{quote(identifier, safe='')}"), params=params
         )
+        if not self._identity_ok(identifier, data, "UserProfile"):
+            got = (data or {}).get("public_identifier") or (data or {}).get("id")
+            raise UnipileError(
+                f"Unipile identity_mismatch: profil demandé {identifier!r}, "
+                f"reçu {got!r} (object={(data or {}).get('object')!r}). "
+                "Réponse rejetée — réessaie."
+            )
+        return data
+
+    def _get_company_raw(self, identifier: str) -> dict:
+        """GET société brut + garde anti-mismatch #153. Lève telle quelle
+        (404 inclus) — le fallback de résolution vit dans `get_company`."""
+        data = self._request(
+            "GET", self._acct(f"/linkedin/company/{quote(identifier, safe='')}")
+        )
+        if not self._identity_ok(identifier, data, "CompanyProfile"):
+            got = (data or {}).get("public_identifier") or (data or {}).get("id")
+            raise UnipileError(
+                f"Unipile identity_mismatch: société demandée {identifier!r}, "
+                f"reçu {got!r} (object={(data or {}).get('object')!r}). "
+                "Réponse rejetée — réessaie."
+            )
+        return data
+
+    def _resolve_company_slugs(self, name: str, limit: int = 5) -> list[str]:
+        """#176 : cherche des sociétés par nom → `public_identifier` candidats,
+        par ordre de pertinence. Best-effort : ne doit jamais masquer le 404
+        d'origine (toute erreur de recherche → aucun candidat)."""
+        try:
+            res = self.search(category="companies", keywords=name)
+        except Exception:  # noqa: BLE001 — résolution best-effort, jamais fatale
+            return []
+        items = (res or {}).get("items") or (res or {}).get("data") or []
+        out: list[str] = []
+        for it in items[:limit]:
+            if not isinstance(it, dict):
+                continue
+            slug = it.get("public_identifier") or _slug_from_company_url(
+                it.get("public_profile_url") or it.get("profile_url") or ""
+            )
+            if slug:
+                out.append(slug)
+        return list(dict.fromkeys(out))  # dédup en conservant l'ordre
+
+    def get_company(self, identifier: str, resolve: bool = True) -> dict:
+        """Fiche société. `identifier` = slug (`public_identifier`) ou id numérique.
+
+        Garde #153 : rejette une réponse d'un autre objet/identifiant.
+        Résolution tolérante #176 : si le slug fourni est introuvable (404) et
+        non numérique, on tente une recherche société par nom pour retrouver le
+        `public_identifier` canonique (ex. `mooniz` → `mooniz1`) et on réessaie.
+        Échec → 404 propre enrichi des candidats proches (`resolve=False` coupe
+        le fallback)."""
+        try:
+            return self._get_company_raw(identifier)
+        except UnipileError as e:
+            ident = str(identifier).strip()
+            if not resolve or e.status_code != 404 or ident.isdigit():
+                raise
+            candidates = self._resolve_company_slugs(ident)
+            for slug in candidates:
+                if slug.strip().lower() != ident.lower():
+                    try:
+                        return self._get_company_raw(slug)
+                    except UnipileError:
+                        continue
+            if candidates:
+                raise UnipileError(
+                    f"Unipile 404: société {identifier!r} introuvable. "
+                    f"Slugs candidats proches : {', '.join(candidates)}.",
+                    status_code=404,
+                ) from e
+            raise
 
     # ---- messagerie ------------------------------------------------------
 
-    def list_chats(self, limit: int = 20, cursor: Optional[str] = None,
-                   with_attendee_names: bool = False) -> dict:
-        """Fils de messagerie du compte connecté. Paginé (`limit` + `cursor`).
+    def list_inboxes(self) -> dict:
+        """Inboxes du compte (v2 : `GET /v2/{account}/inboxes`). LinkedIn classic :
+        `CLASSIC_PRIMARY` (principale), `CLASSIC_ARCHIVED`, `CLASSIC_SPAM`,
+        `CLASSIC_JOBS`, `CLASSIC_INMAIL`, `CLASSIC_STARRED`."""
+        return self._norm(self._request("GET", self._acct("/inboxes")))
 
-        `with_attendee_names=True` enrichit chaque fil 1-à-1 de champs
-        `attendee_name`/`attendee_headline`/`attendee_profile_url` résolus en
-        batch via le carnet `/attendees` (les fils 1-à-1 LinkedIn arrivent avec
-        `name: null` et un `attendee_provider_id` opaque — impossible de savoir
-        QUI sans ça). Enrichissement best-effort : un id non résolu laisse les
-        champs absents, une erreur du carnet n'empêche pas la liste."""
-        params: dict[str, Any] = {"account_id": self.account_id(), "limit": limit}
+    def list_chats(self, limit: int = 20, cursor: Optional[str] = None,
+                   with_attendee_names: bool = False,
+                   inbox: str = "CLASSIC_PRIMARY") -> dict:
+        """Fils de messagerie. v2 : les chats sont rangés **par inbox**
+        (`GET /v2/{account}/inboxes/{inbox}/chats`) — l'ancien `/chats` renvoie
+        501 « Use List inbox Chats endpoint » pour LinkedIn (delta live 2026-07-06).
+        `inbox` défaut = `CLASSIC_PRIMARY` (boîte principale) ; autres inboxes via
+        `list_inboxes`."""
+        params: dict[str, Any] = {"limit": limit}
         if cursor:
             params["cursor"] = cursor
-        data = self._request("GET", "/chats", params=params)
+        data = self._norm(self._request(
+            "GET", self._acct(f"/inboxes/{quote(inbox, safe='')}/chats"),
+            params=params))
         if with_attendee_names:
             self._annotate_chat_attendees(data)
         return data
 
     def resolve_attendee_names(self, provider_ids, max_pages: int = 10,
                                page_limit: int = 100) -> dict:
-        """Résout des `attendee_provider_id` en fiches attendee via le carnet
-        `/attendees` paginé (1 famille d'appels batch, PAS un appel par fil).
-
-        Retourne `{provider_id: attendee}` (name, picture_url, profile_url,
-        specifics…). Arrêt anticipé dès que tous les ids demandés sont résolus ;
-        borné à `max_pages` pages de `page_limit` — les ids au-delà restent
-        simplement absents de la map (best-effort)."""
+        """Résout des `attendee_provider_id` via le carnet de contacts v2
+        (`/v2/{account}/contacts`, paginé). Best-effort."""
         wanted = {str(p) for p in provider_ids if p}
         out: dict[str, dict] = {}
         cursor = None
@@ -346,7 +496,7 @@ class UnipileClient:
             for att in items:
                 if not isinstance(att, dict):
                     continue
-                pid = str(att.get("provider_id") or "")
+                pid = str(att.get("provider_id") or att.get("id") or "")
                 if pid in wanted:
                     out[pid] = att
             cursor = (page or {}).get("cursor")
@@ -355,9 +505,8 @@ class UnipileClient:
         return out
 
     def _annotate_chat_attendees(self, data: Any) -> None:
-        """Enrichit in-place les items d'un payload `/chats` avec le nom de leur
-        interlocuteur (`attendee_name`/`attendee_headline`/`attendee_profile_url`).
-        Best-effort : ne lève jamais (la liste des fils prime sur l'enrichissement)."""
+        """Enrichit in-place les fils d'un `/chats` avec le nom de l'interlocuteur.
+        Best-effort : ne lève jamais (la liste prime sur l'enrichissement)."""
         items = (data or {}).get("items") if isinstance(data, dict) else None
         if not isinstance(items, list):
             return
@@ -369,7 +518,7 @@ class UnipileClient:
         try:
             resolved = self.resolve_attendee_names(ids)
         except Exception:  # noqa: BLE001 — enrichissement best-effort voulu
-            logger.warning("unipile chats: résolution des attendees échouée, "
+            logger.warning("unipile chats: résolution attendees échouée, "
                            "liste servie sans enrichissement", exc_info=True)
             return
         for it in items:
@@ -384,126 +533,165 @@ class UnipileClient:
 
     def list_messages(self, chat_id: str, limit: int = 50) -> dict:
         params = {"limit": limit}
-        return self._request("GET", f"/chats/{chat_id}/messages", params=params)
+        return self._norm(self._request(
+            "GET", self._acct(f"/chats/{quote(chat_id, safe='')}/messages"),
+            params=params,
+        ))
 
     def send_message(
         self,
         text: str,
         chat_id: Optional[str] = None,
         attendee_id: Optional[str] = None,
+        inbox: str = "CLASSIC_PRIMARY",
     ) -> dict:
-        """Envoie un message. `chat_id` → répond dans un fil existant ;
-        sinon `attendee_id` (provider id du destinataire) → ouvre un nouveau fil.
-        """
         if chat_id:
             return self._request(
-                "POST", f"/chats/{chat_id}/messages", json={"text": text}
+                "POST", self._acct(f"/chats/{quote(chat_id, safe='')}/messages/send"),
+                json={"text": text},
             )
         if not attendee_id:
             raise UnipileError("send_message : chat_id ou attendee_id requis.")
-        body = {
-            "account_id": self.account_id(),
-            "attendees_ids": [attendee_id],
-            "text": text,
-        }
-        return self._request("POST", "/chats", json=body)
+        # v2 : pour un provider à INBOX (LinkedIn), le nouveau fil passe par l'inbox —
+        # `POST /v2/{account}/inboxes/{inbox}/chats/send`, `users_ids`. Le `/chats/send`
+        # générique renvoie 501 « Use Start a Chat in the given inbox endpoint for this
+        # provider » (relevé live 2026-07-08 — même modèle inbox que list_chats). Signal #199/#200.
+        return self._request(
+            "POST", self._acct(f"/inboxes/{quote(inbox, safe='')}/chats/send"),
+            json={"users_ids": [attendee_id], "text": text},
+        )
 
-    # ---- réseau / outreach (LinkedIn) -----------------------------------
+    # ---- réseau / outreach ----------------------------------------------
 
     def list_relations(self, cursor: Optional[str] = None,
                        limit: Optional[int] = None) -> dict:
-        """Relations de 1er degré (N1) du compte connecté. `limit` prime sur le
-        limit figé dans le `cursor` (réécrit, cf. `cursor_with_limit`)."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        params: dict[str, Any] = {}
         if cursor:
+            # Le limit de l'appel prime sur celui figé dans le cursor (#179).
             params["cursor"] = cursor_with_limit(cursor, limit) if limit else cursor
         if limit:
             params["limit"] = limit
-        return self._request("GET", "/users/relations", params=params)
+        return self._norm(self._request(
+            "GET", self._acct("/users/me/relations"), params=params
+        ))
 
     def list_invitations(self, direction: str = "received",
                          limit: Optional[int] = None,
                          cursor: Optional[str] = None) -> dict:
-        """Invitations de connexion — `direction` = 'received' (reçues) ou 'sent'.
-        Paginé (`limit` + `cursor`) : sans borne l'endpoint renvoie TOUT le
-        backlog (vécu : ~72k chars, réponse inexploitable par un agent)."""
-        d = "sent" if direction == "sent" else "received"
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        """Invitations — v2 : `GET /v2/{account}/users/me/relation-requests`,
+        `type=sent|received`. `limit` est un vrai param serveur (plus de curseur
+        qui fige le limit, cf. #179)."""
+        params: dict[str, Any] = {
+            "type": "sent" if direction == "sent" else "received"
+        }
         if limit:
             params["limit"] = limit
         if cursor:
             params["cursor"] = cursor
-        data = self._request("GET", f"/users/invite/{d}", params=params)
-        # Garde-fou : si l'API ignore `limit`, on tronque côté client en le
-        # signalant (`truncated`) plutôt que de resservir le backlog entier.
-        if limit and isinstance(data, dict):
-            items = data.get("items")
-            if isinstance(items, list) and len(items) > limit:
-                data["items"] = items[:limit]
-                data["truncated"] = True
-        return data
+        return self._norm(self._request(
+            "GET", self._acct("/users/me/relation-requests"), params=params
+        ))
 
     def send_invitation(self, provider_id: str,
                         message: Optional[str] = None) -> dict:
-        """Envoie une demande de connexion LinkedIn à `provider_id` (+ note ≤300c).
-        `provider_id` = le champ `provider_id` d'un profil/résultat de recherche."""
-        body: dict[str, Any] = {
-            "account_id": self.account_id(),
-            "provider_id": provider_id,
-        }
+        """v2 : `POST /users/me/relation-requests`, corps `{user_id, message}`."""
+        body: dict[str, Any] = {"user_id": provider_id}
         if message:
             body["message"] = message
-        return self._request("POST", "/users/invite", json=body)
+        return self._request(
+            "POST", self._acct("/users/me/relation-requests"), json=body
+        )
 
-    # ---- posts / engagement (LinkedIn) ----------------------------------
-    # Lectures vérifiées en live ; POST = chemins inférés (convention REST + index
-    # Unipile), non sondés en dev pour ne pas publier sous l'identité du compte.
+    def handle_invitation(
+        self, invitation_id: str, shared_secret: str, action: str = "accept"
+    ) -> dict:
+        """Accepte/refuse une invitation REÇUE. v2 : `request_id` suffit (plus de
+        `shared_secret`, gardé dans la signature pour compat appelant). accept →
+        `/accept` ; decline → `/cancel`."""
+        if action not in ("accept", "decline"):
+            raise UnipileError("handle_invitation : action = 'accept' ou 'decline'.")
+        verb = "accept" if action == "accept" else "cancel"
+        return self._request(
+            "POST",
+            self._acct(
+                f"/users/me/relation-requests/{quote(invitation_id, safe='')}/{verb}"
+            ),
+        )
+
+    def cancel_invitation(self, invitation_id: str) -> dict:
+        """Annule une invitation ENVOYÉE. v2 : `/relation-requests/{id}/cancel`."""
+        return self._request(
+            "POST",
+            self._acct(
+                f"/users/me/relation-requests/{quote(invitation_id, safe='')}/cancel"
+            ),
+        )
+
+    # ---- posts / engagement ---------------------------------------------
+
+    def _member_id(self, identifier: str) -> str:
+        """Résout un identifiant de membre vers le **provider_id (URN, `ACoAA…`)**
+        attendu par les endpoints posts/comments/reactions v2 : le slug public y
+        renvoie 400 « Invalid User ID » (delta v2 relevé en live 2026-07-06). URN
+        déjà opaque → tel quel ; slug → résolu via le profil (1 appel)."""
+        ident = str(identifier).strip()
+        if ident.startswith(("ACoA", "urn:")):
+            return ident
+        prof = self.get_profile(ident)
+        return str((prof or {}).get("provider_id") or (prof or {}).get("id") or ident)
 
     def list_member_posts(self, identifier: str, cursor: Optional[str] = None,
                           limit: Optional[int] = None) -> dict:
-        """Posts publiés par un membre (`identifier` = provider id ou slug)."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
         if limit:
             params["limit"] = limit
-        return self._request("GET", f"/users/{quote(identifier, safe='')}/posts", params=params)
+        return self._norm(self._request(
+            "GET", self._acct(f"/users/{quote(self._member_id(identifier), safe='')}/posts"),
+            params=params,
+        ))
 
     def get_post(self, post_id: str) -> dict:
-        return self._request("GET", f"/posts/{quote(post_id, safe='')}",
-                             params={"account_id": self.account_id()})
+        return self._request(
+            "GET", self._acct(f"/posts/{quote(post_id, safe='')}")
+        )
 
     def list_comments(self, post_id: str, cursor: Optional[str] = None) -> dict:
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
-        return self._request("GET", f"/posts/{quote(post_id, safe='')}/comments", params=params)
+        return self._norm(self._request(
+            "GET", self._acct(f"/posts/{quote(post_id, safe='')}/comments"),
+            params=params,
+        ))
 
     def list_reactions(self, post_id: str, cursor: Optional[str] = None) -> dict:
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
-        return self._request("GET", f"/posts/{quote(post_id, safe='')}/reactions", params=params)
+        return self._norm(self._request(
+            "GET", self._acct(f"/posts/{quote(post_id, safe='')}/reactions"),
+            params=params,
+        ))
 
     def create_post(self, text: str) -> dict:
-        """Publie un post (chemin POST inféré)."""
-        return self._request("POST", "/posts",
-                             json={"account_id": self.account_id(), "text": text})
+        return self._request("POST", self._acct("/posts"), json={"text": text})
 
     def comment_post(self, post_id: str, text: str) -> dict:
-        """Commente un post (chemin POST inféré)."""
-        return self._request("POST", f"/posts/{quote(post_id, safe='')}/comments",
-                             json={"account_id": self.account_id(), "text": text})
+        return self._request(
+            "POST", self._acct(f"/posts/{quote(post_id, safe='')}/comments"),
+            json={"text": text},
+        )
 
     def react_post(self, post_id: str, value: str = "LIKE") -> dict:
-        """Réagit à un post (chemin POST inféré). value LIKE|PRAISE|EMPATHY|INTEREST|
-        APPRECIATION|ENTERTAINMENT."""
-        return self._request("POST", f"/posts/{quote(post_id, safe='')}/reactions",
-                             json={"account_id": self.account_id(), "value": value})
+        """Réagit à un post. v2 : corps `{reaction}`."""
+        return self._request(
+            "POST", self._acct(f"/posts/{quote(post_id, safe='')}/reactions"),
+            json={"reaction": value},
+        )
 
-    # ---- raw data route (Magic Route → Voyager passthrough) --------------
-    # Pas un endpoint « propre » : on relaie une requête Voyager brute via Unipile.
-    # Cf. https://developer.unipile.com/reference/linkedincontroller_getrawdata
+    # ---- feed (Voyager passthrough via proxyRequest v2) -----------------
 
     def linkedin_raw(
         self,
@@ -514,35 +702,18 @@ class UnipileClient:
         encoding: bool = False,
         force_api: bool = False,
     ) -> dict:
-        """Relaie une requête arbitraire vers l'API interne Voyager de LinkedIn
-        via la Magic Route Unipile (`POST /api/v1/linkedin`), exécutée avec la
-        session du compte connecté.
-
-        Args:
-            request_url: URL Voyager (`https://www.linkedin.com/voyager/api/...`).
-            method: verbe HTTP relayé (défaut GET).
-            body: payload pour les requêtes POST/PUT/PATCH.
-            headers: en-têtes HTTP custom.
-            encoding: encode query params/form body côté Unipile (défaut False —
-                les query Voyager GraphQL sont déjà formées à la main).
-            force_api: force l'usage d'une API sans abonnement actif.
-
-        Retourne l'enveloppe Unipile `{object: "LinkedinRawData", data: {...}}`,
-        où `data` est le JSON brut renvoyé par Voyager.
-        """
+        """Relaie une requête Voyager brute — v2 : `POST /v2/{account}/linkedin/`
+        (proxyRequest), corps `{url, method, bypass_url_encoding, …}`."""
         payload: dict[str, Any] = {
-            "account_id": self.account_id(),
-            "request_url": request_url,
+            "url": request_url,
             "method": method,
-            "encoding": encoding,
+            "bypass_url_encoding": not encoding,
         }
         if body is not None:
             payload["body"] = body
         if headers:
             payload["headers"] = headers
-        if force_api:
-            payload["force_api"] = True
-        return self._request("POST", "/linkedin", json=payload)
+        return self._request("POST", self._acct("/linkedin/"), json=payload)
 
     def get_feed(
         self,
@@ -551,29 +722,7 @@ class UnipileClient:
         raw: bool = False,
         sort_order: str = "MEMBER_SETTING",
     ) -> dict:
-        """Feed d'accueil LinkedIn (la page d'accueil) du compte connecté, via la
-        Magic Route raw data → Voyager (cf. FEED_QUERY_ID).
-
-        ⚠️ L'ordre n'est PAS un chrono garanti : `sort_order=MEMBER_SETTING`
-        (défaut) **respecte le réglage de tri choisi sur ta home LinkedIn** (« Les
-        plus pertinents » / « Plus récents »). Pour un miroir chronologique, règle
-        ta home LinkedIn sur « Plus récents ». Quel que soit l'ordre de service,
-        chaque post porte `posted_at` (décodé de l'id d'activité) → l'appelant peut
-        toujours re-trier de façon stable. Les encarts sponsorisés/promo sont exclus.
-
-        Args:
-            count: nombre d'items voulus (le feed Voyager pagine par lots ;
-                on tronque la page courante à `count`).
-            cursor: curseur opaque renvoyé par un appel précédent
-                (`"<start>|<paginationToken>"`) pour la page suivante. None = 1re page.
-            raw: True → renvoie l'enveloppe Unipile brute sans mapping (debug).
-            sort_order: valeur de tri Voyager pour les pages paginées
-                (`MEMBER_SETTING` par défaut). N'affecte que les pages suivantes :
-                la 1re page suit toujours le tri par défaut de la home.
-
-        Retourne `{items: [...], cursor: str|None, count: int}` où chaque item est
-        normalisé par `parse_feed` (posts organiques seulement).
-        """
+        """Feed d'accueil LinkedIn via la Magic Route Voyager."""
         start, token = _unpack_cursor(cursor)
         if token:
             variables = (
@@ -585,7 +734,6 @@ class UnipileClient:
                 f"?variables={variables}&queryId={FEED_QUERY_ID}"
             )
         else:
-            # 1re page : forme exacte de l'exemple Unipile (sans variables).
             request_url = (
                 "https://www.linkedin.com/voyager/api/graphql"
                 f"?queryId={FEED_QUERY_ID}"
@@ -595,262 +743,239 @@ class UnipileClient:
             return resp
         return parse_feed(resp, count=count, start=start)
 
-    # ---- réseau : invitations (handle / cancel) -------------------------
-
-    def handle_invitation(
-        self, invitation_id: str, shared_secret: str, action: str = "accept"
-    ) -> dict:
-        """Accepte ou refuse une invitation LinkedIn REÇUE.
-
-        Args:
-            invitation_id: id de l'invitation (champ d'un item `list_invitations
-                ('received')`).
-            shared_secret: token fourni par LinkedIn sur le même item
-                (obligatoire côté API pour traiter une invitation reçue).
-            action: 'accept' ou 'decline'.
-        """
-        if action not in ("accept", "decline"):
-            raise UnipileError("handle_invitation : action = 'accept' ou 'decline'.")
-        body = {
-            "provider": "LINKEDIN",
-            "account_id": self.account_id(),
-            "shared_secret": shared_secret,
-            "action": action,
-        }
-        return self._request(
-            "POST", f"/users/invite/received/{quote(invitation_id, safe='')}", json=body
-        )
-
-    def cancel_invitation(self, invitation_id: str) -> dict:
-        """Annule une invitation LinkedIn ENVOYÉE (en attente). `invitation_id` =
-        id d'un item `list_invitations('sent')`."""
-        return self._request(
-            "DELETE", f"/users/invite/sent/{quote(invitation_id, safe='')}",
-            params={"account_id": self.account_id()},
-        )
-
-    # ---- réseau : followers / following / activité d'un membre ----------
+    # ---- moi / followers / activité d'un membre -------------------------
 
     def get_own_profile(self) -> dict:
-        """Profil du compte connecté lui-même (le « moi » LinkedIn)."""
-        return self._request("GET", "/users/me",
-                             params={"account_id": self.account_id()})
+        """Profil du compte connecté. v2 : `GET /users/me` (pas de garde #153 :
+        l'id rendu ≠ le littéral « me »)."""
+        return self._request("GET", self._acct("/users/me"))
 
     def list_followers(self, user_id: Optional[str] = None,
                       cursor: Optional[str] = None,
                       limit: Optional[int] = None) -> dict:
-        """Followers (LinkedIn : du compte connecté ; `user_id` = autre membre
-        selon le provider). Paginé."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
-        if user_id:
-            params["user_id"] = user_id
+        uid = user_id or "me"
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
         if limit:
             params["limit"] = limit
-        return self._request("GET", "/users/followers", params=params)
+        return self._norm(self._request(
+            "GET", self._acct(f"/users/{quote(uid, safe='')}/followers"),
+            params=params,
+        ))
 
     def list_following(self, user_id: Optional[str] = None,
                       cursor: Optional[str] = None,
                       limit: Optional[int] = None) -> dict:
-        """Comptes suivis. Paginé."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
-        if user_id:
-            params["user_id"] = user_id
+        uid = user_id or "me"
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
         if limit:
             params["limit"] = limit
-        return self._request("GET", "/users/following", params=params)
+        return self._norm(self._request(
+            "GET", self._acct(f"/users/{quote(uid, safe='')}/following"),
+            params=params,
+        ))
 
     def list_member_comments(self, identifier: str,
                             cursor: Optional[str] = None,
                             limit: Optional[int] = None) -> dict:
-        """Commentaires laissés par un membre (`identifier` = provider id). Pour
-        repérer ce qu'un prospect engage → accroche social-selling."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
         if limit:
             params["limit"] = limit
-        return self._request(
-            "GET", f"/users/{quote(identifier, safe='')}/comments", params=params
-        )
+        return self._norm(self._request(
+            "GET", self._acct(f"/users/{quote(self._member_id(identifier), safe='')}/comments"),
+            params=params,
+        ))
 
     def list_member_reactions(self, identifier: str,
                              cursor: Optional[str] = None,
                              limit: Optional[int] = None) -> dict:
-        """Réactions d'un membre (`identifier` = provider id) — posts qu'il a likés."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
         if limit:
             params["limit"] = limit
-        return self._request(
-            "GET", f"/users/{quote(identifier, safe='')}/reactions", params=params
-        )
+        return self._norm(self._request(
+            "GET", self._acct(f"/users/{quote(self._member_id(identifier), safe='')}/reactions"),
+            params=params,
+        ))
 
     # ---- messagerie : participants / contacts / état du fil -------------
 
     def list_chat_attendees(self, chat_id: str) -> dict:
-        """Participants d'un fil de messagerie (`chat_id` d'un `list_chats`)."""
-        return self._request(
-            "GET", f"/chats/{quote(chat_id, safe='')}/attendees",
-            params={"account_id": self.account_id()},
-        )
+        """Participants d'un fil. v2 : `/chats/{chat_id}/participants`."""
+        return self._norm(self._request(
+            "GET", self._acct(f"/chats/{quote(chat_id, safe='')}/participants")
+        ))
 
     def list_attendees(self, cursor: Optional[str] = None,
                       limit: Optional[int] = None) -> dict:
-        """Carnet de contacts de messagerie (tous les interlocuteurs). Paginé."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        """Carnet de contacts. v2 : `/v2/{account}/contacts`."""
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
         if limit:
             params["limit"] = limit
-        return self._request("GET", "/attendees", params=params)
+        return self._norm(self._request(
+            "GET", self._acct("/contacts"), params=params
+        ))
+
+    # v2 updateChat : champs dédiés (plus le couple {action, value}).
+    _CHAT_ACTION_FIELD = {
+        "setReadStatus": "read_status",
+        "setMuteStatus": "muted_until",
+        "setArchiveStatus": "archive_status",
+        "setPinnedStatus": "pin_status",
+        "setLabel": "label",
+    }
 
     def patch_chat(self, chat_id: str, action: str, value: Any = None) -> dict:
-        """Modifie l'état d'un fil. `action` ∈ setReadStatus | setMuteStatus |
-        setArchiveStatus | setPinnedStatus | addParticipant | removeParticipant |
-        setLabel | getInviteLink. `value` = booléen (statuts) ou string
-        (participant/label) ; omis pour getInviteLink."""
-        body: dict[str, Any] = {"action": action}
-        if value is not None:
-            body["value"] = value
+        """Modifie l'état d'un fil (`PATCH /chats/{id}`)."""
+        field = self._CHAT_ACTION_FIELD.get(action)
+        if field is None:
+            raise UnipileError(
+                f"patch_chat : action {action!r} non supportée "
+                f"({', '.join(self._CHAT_ACTION_FIELD)})."
+            )
         return self._request(
-            "PATCH", f"/chats/{quote(chat_id, safe='')}", json=body
+            "PATCH", self._acct(f"/chats/{quote(chat_id, safe='')}"),
+            json={field: value},
         )
 
     def react_message(self, message_id: str, reaction: str,
                       chat_id: Optional[str] = None) -> dict:
-        """Réagit à un message (DM) avec un emoji natif (ex. '👍'). `message_id` =
-        id d'un message de `list_messages`. `chat_id` n'est requis qu'en v2
-        (accepté et ignoré ici pour une signature commune aux deux clients)."""
+        """Réagit à un message. v2 exige le `chat_id` (route sous le fil)."""
+        if not chat_id:
+            raise UnipileError(
+                "react_message : chat_id requis "
+                "(route /chats/{chat_id}/messages/{message_id}/reactions)."
+            )
         return self._request(
-            "POST", f"/messages/{quote(message_id, safe='')}/reaction",
+            "POST",
+            self._acct(
+                f"/chats/{quote(chat_id, safe='')}"
+                f"/messages/{quote(message_id, safe='')}/reactions"
+            ),
             json={"reaction": reaction},
         )
 
-    # ---- LinkedIn recruiter / sales navigator ---------------------------
-    # Nécessitent un abonnement Recruiter / Sales Navigator sur le compte
-    # connecté ; sinon l'API Unipile renvoie une erreur (remontée telle quelle).
+    # ---- recruiter / sales navigator ------------------------------------
 
     def list_contracts(self) -> dict:
-        """Contrats LinkedIn premium disponibles (Recruiter / Sales Navigator) du
-        compte — id à passer à `select_contract` pour activer la bonne ardoise."""
-        return self._request("GET", "/linkedin/contracts",
-                             params={"account_id": self.account_id()})
+        return self._request("GET", self._acct("/linkedin/contracts"))
 
     def select_contract(self, contract_id: str) -> dict:
-        """Active un contrat Recruiter / Sales Navigator (`contract_id` de
-        `list_contracts`) pour les appels premium qui suivent."""
         return self._request(
-            "POST", f"/linkedin/contracts/{quote(contract_id, safe='')}/select",
-            params={"account_id": self.account_id()},
+            "POST",
+            self._acct(f"/linkedin/contracts/{quote(contract_id, safe='')}/select"),
         )
 
     def inmail_balance(self) -> dict:
-        """Solde de crédits InMail (messages premium) du compte connecté."""
-        return self._request("GET", "/linkedin/inmail/balance",
-                             params={"account_id": self.account_id()})
+        """Solde InMail. v2 : `GET /linkedin/inmail-credits`. Réponse `{object, credits}`."""
+        return self._request("GET", self._acct("/linkedin/inmail-credits"))
 
     def endorse_profile(self, profile_id: str, skill_endorsement_id: int) -> dict:
-        """Recommande une compétence d'un membre.
-
-        Args:
-            profile_id: provider id du membre (commence par ACo/ADo).
-            skill_endorsement_id: `endorsement_id` d'une compétence, renvoyé dans le
-                profil (`get_profile`).
-        """
-        return self._request("POST", "/linkedin/profile/endorse", json={
-            "account_id": self.account_id(),
-            "profile_id": profile_id,
-            "skill_endorsement_id": skill_endorsement_id,
-        })
+        """v2 : `POST /linkedin/member/{member_id}/endorse-skill`, corps
+        `{skill_id}`."""
+        return self._request(
+            "POST",
+            self._acct(f"/linkedin/member/{quote(profile_id, safe='')}/endorse-skill"),
+            json={"skill_id": str(skill_endorsement_id)},
+        )
 
     def member_action(self, user_id: str, api: str, action: str,
                      hiring_project_id: Optional[str] = None,
                      stage: Optional[str] = None,
                      list_id: Optional[str] = None) -> dict:
-        """Action premium sur un membre (sauvegarde lead / pipeline recruteur).
-
-        Args:
-            user_id: provider id du membre.
-            api: 'sales_navigator' ou 'recruiter'.
-            action: sales_navigator → 'saveLead' ; recruiter →
-                'addCandidateToPipeline' | 'addApplicantToPipeline' |
-                'changeCandidatePipeline' | 'rejectApplicant'.
-            hiring_project_id: requis pour les actions pipeline recruiter.
-            stage: pipeline recruiter — 'UNCONTACTED' | 'CONTACTED' | 'REPLIED'.
-            list_id: liste Sales Navigator cible (optionnel pour saveLead).
-        """
-        body: dict[str, Any] = {
-            "account_id": self.account_id(),
-            "api": api,
-            "action": action,
-        }
-        if hiring_project_id:
-            body["hiring_project_id"] = hiring_project_id
-        if stage:
-            body["stage"] = stage
-        if list_id:
-            body["list_id"] = list_id
-        return self._request(
-            "POST", f"/linkedin/user/{quote(user_id, safe='')}", json=body
+        """Action premium (sauvegarde lead / pipeline recruteur). v2 éclate ces
+        actions par produit ; on mappe les cas courants, sinon erreur claire."""
+        if api == "sales_navigator" and action == "saveLead":
+            if not list_id:
+                raise UnipileError("saveLead : list_id (lead-list) requis.")
+            return self._request(
+                "POST",
+                self._acct(
+                    f"/linkedin/sales-navigator/lead-lists/{quote(list_id, safe='')}/save"
+                ),
+                json={"user_id": user_id},
+            )
+        if api == "recruiter" and action in (
+            "addCandidateToPipeline", "addApplicantToPipeline"
+        ):
+            if not hiring_project_id:
+                raise UnipileError(
+                    "pipeline recruiter : hiring_project_id requis."
+                )
+            body: dict[str, Any] = {"user_id": user_id}
+            if stage:
+                body["stage"] = stage
+            return self._request(
+                "POST",
+                self._acct(
+                    f"/linkedin/recruiter/projects/"
+                    f"{quote(hiring_project_id, safe='')}/pipeline/candidate/save"
+                ),
+                json=body,
+            )
+        raise UnipileError(
+            f"member_action : combinaison api={api!r} action={action!r} "
+            "non mappée."
         )
 
-    # ---- LinkedIn recruiter : offres d'emploi & candidats (lectures) ----
-    # Chemins REST de l'inventaire Unipile (best-effort, gatés Recruiter).
+    # ---- recruiter : offres & candidats ---------------------------------
 
     def list_job_postings(self, cursor: Optional[str] = None,
                          limit: Optional[int] = None) -> dict:
-        """Offres d'emploi (job postings) du compte recruteur. Paginé."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
         if limit:
             params["limit"] = limit
-        return self._request("GET", "/linkedin/job-postings", params=params)
+        return self._norm(self._request(
+            "GET", self._acct("/linkedin/jobs"), params=params
+        ))
 
     def get_job_posting(self, job_id: str) -> dict:
-        """Détail d'une offre d'emploi (`job_id` de `list_job_postings`)."""
         return self._request(
-            "GET", f"/linkedin/job-postings/{quote(job_id, safe='')}",
-            params={"account_id": self.account_id()},
+            "GET", self._acct(f"/linkedin/jobs/{quote(job_id, safe='')}")
         )
 
     def list_job_applicants(self, job_id: str, cursor: Optional[str] = None,
                            limit: Optional[int] = None) -> dict:
-        """Candidats d'une offre d'emploi. Paginé."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        """v2 : `POST /linkedin/jobs/{job_id}/applicants` (getClassicApplicants)."""
+        body: dict[str, Any] = {}
         if cursor:
-            params["cursor"] = cursor
+            body["cursor"] = cursor
         if limit:
-            params["limit"] = limit
-        return self._request(
-            "GET", f"/linkedin/job-postings/{quote(job_id, safe='')}/applicants",
-            params=params,
-        )
+            body["limit"] = limit
+        return self._norm(self._request(
+            "POST", self._acct(f"/linkedin/jobs/{quote(job_id, safe='')}/applicants"),
+            json=body,
+        ))
 
     def get_job_applicant(self, job_id: str, applicant_id: str) -> dict:
-        """Détail d'un candidat d'une offre."""
         return self._request(
             "GET",
-            f"/linkedin/job-postings/{quote(job_id, safe='')}"
-            f"/applicants/{quote(applicant_id, safe='')}",
-            params={"account_id": self.account_id()},
+            self._acct(
+                f"/linkedin/jobs/{quote(job_id, safe='')}"
+                f"/applicants/{quote(applicant_id, safe='')}"
+            ),
         )
 
     def list_hiring_projects(self, cursor: Optional[str] = None,
                             limit: Optional[int] = None) -> dict:
-        """Projets de recrutement (hiring projects) du compte Recruiter. Paginé.
-        Le `hiring_project_id` alimente `member_action` (pipeline)."""
-        params: dict[str, Any] = {"account_id": self.account_id()}
+        params: dict[str, Any] = {}
         if cursor:
             params["cursor"] = cursor
         if limit:
             params["limit"] = limit
-        return self._request("GET", "/linkedin/hiring-projects", params=params)
+        return self._norm(self._request(
+            "GET", self._acct("/linkedin/recruiter/projects"), params=params
+        ))
 
 
 # ---- feed parsing (Voyager graphe normalisé) ----------------------------
