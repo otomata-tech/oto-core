@@ -435,6 +435,24 @@ class PennylaneClient:
         """Update a customer. Accepts any top-level field (name, vat_number, emails, billing_address, etc.)."""
         return self.put(f"company_customers/{customer_id}", fields)
 
+    # --- Suppliers ---
+    # NB: unlike customers (`company_customers`), the v2 supplier resource is `suppliers`
+    # (GET/POST /suppliers, GET/PUT /suppliers/{id}). Needed to create/reuse a supplier
+    # before `import_supplier_invoice` (which requires an existing supplier_id).
+
+    def list_suppliers(self, max_pages: Optional[int] = None) -> list:
+        """List all suppliers (id + name → resolve a supplier_id from a name)."""
+        return self.fetch_all_pages("suppliers", max_pages=max_pages)
+
+    def create_supplier(self, name: str, **fields) -> dict:
+        """Create a supplier. `name` is required; pass any other documented top-level
+        field (vat_number, reg_no, emails, address, iban, external_reference…)."""
+        return self.post("suppliers", {"name": name, **fields})
+
+    def get_supplier(self, supplier_id: int) -> dict:
+        """Retrieve a single supplier by id."""
+        return self.fetch(f"suppliers/{supplier_id}")
+
     # --- Products ---
 
     def list_products(self, max_pages: Optional[int] = None) -> list:
