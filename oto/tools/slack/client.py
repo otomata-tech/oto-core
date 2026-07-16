@@ -111,11 +111,14 @@ class SlackClient:
     - **user token** (`xoxp-`) — messages appear as the human user who installed
       the app. Use for outbound human-style com sent on behalf of that user.
 
-    Reads/lookups (history, find user, list channels) use the bot token by default
-    — bot scopes are usually granted and the response is the same. `post_message`,
-    `update_message`, `open_dm`, `add_reaction` accept `as_user=True/False` to pick
-    the token explicitly. If `as_user` is omitted, falls back to `default_as_user`
-    set at construction (defaults to False = bot-style).
+    Reads route by Slack surface (see `_prefer`): channel reads (list channels,
+    channel history) go through the **bot** token — the bot is invited and this
+    keeps the user token's scopes minimal — while DM reads (own DMs, `open_dm`,
+    `search`) go through the **user** token, since only the user sees their own
+    conversations. When a single token is configured, reads fall through to it.
+    Writes (`post_message`, `update_message`, `add_reaction`) accept
+    `as_user=True/False`; omitted → `default_as_user` (construction, default
+    False = bot-style). Every read also accepts an explicit `as_user` override.
     """
 
     BASE_URL = "https://slack.com/api"
@@ -157,6 +160,18 @@ class SlackClient:
         if not self.bot_token:
             raise ValueError("as_user=False requires SLACK_BOT_TOKEN")
         return self.bot_token
+
+    def _prefer(self, want_user: bool) -> bool:
+        """Capability routing for reads → the `as_user` flag of the token that
+        fits the operation, falling through to the other when only one token is
+        configured. Channel reads fit the **bot** (invited, keeps the user
+        token's scopes minimal); DM/search reads fit the **user** (only they see
+        their own conversations, and `search:read` is a user-token-only scope).
+        Not a legacy fallback: routes to the only usable token, and Slack still
+        returns a typed error if that token genuinely can't do the operation."""
+        if want_user:
+            return bool(self.user_token)   # user token if present, else bot
+        return not self.bot_token          # bot token if present, else user
 
     def _request(
         self,
@@ -286,29 +301,39 @@ class SlackClient:
 
         return self._request("POST", "chat.postEphemeral", json=data)
 
-    def get_user_info(self, user_id: str) -> Dict[str, Any]:
+    def get_user_info(self, user_id: str, as_user: Optional[bool] = None) -> Dict[str, Any]:
         """
         Get user information.
 
         Args:
             user_id: User ID
+            as_user: Token override; None → bot (either token works).
 
         Returns:
             User data
         """
-        return self._request("GET", "users.info", params={"user": user_id})
+        if as_user is None:
+            as_user = self._prefer(want_user=False)
+        return self._request("GET", "users.info", as_user=as_user, params={"user": user_id})
 
-    def list_channels(self, types: str = "public_channel") -> List[Dict[str, Any]]:
+    def list_channels(
+        self, types: str = "public_channel", as_user: Optional[bool] = None
+    ) -> List[Dict[str, Any]]:
         """
         List channels.
 
         Args:
             types: Channel types (public_channel, private_channel, mpim, im)
+            as_user: Token override; None → route by `types` — DM-only listings
+                (im/mpim) via the user token, channels via the bot token.
 
         Returns:
             List of channels
         """
-        data = self._request("GET", "conversations.list", params={"types": types})
+        if as_user is None:
+            wanted = {t.strip() for t in types.split(",") if t.strip()}
+            as_user = self._prefer(want_user=bool(wanted) and wanted <= {"im", "mpim"})
+        data = self._request("GET", "conversations.list", as_user=as_user, params={"types": types})
         return data.get("channels", [])
 
     def add_reaction(self, channel: str, ts: str, name: str) -> Dict[str, Any]:
@@ -336,6 +361,7 @@ class SlackClient:
         cursor: Optional[str] = None,
         oldest: Optional[str] = None,
         latest: Optional[str] = None,
+        as_user: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
         Read recent messages from a channel (or DM/group).
@@ -346,10 +372,14 @@ class SlackClient:
             cursor: Pagination cursor from a previous call
             oldest: Only messages after this ts
             latest: Only messages before this ts
+            as_user: Token override; None → route by channel id — DMs (`D…`) via
+                the user token, channels (`C…`/`G…`) via the bot token.
 
         Returns:
             Response data with "messages" array + "response_metadata.next_cursor"
         """
+        if as_user is None:
+            as_user = self._prefer(want_user=channel.startswith("D"))
         params: Dict[str, Any] = {"channel": channel, "limit": limit}
         if cursor:
             params["cursor"] = cursor
@@ -357,36 +387,43 @@ class SlackClient:
             params["oldest"] = oldest
         if latest:
             params["latest"] = latest
-        return self._request("GET", "conversations.history", params=params)
+        return self._request("GET", "conversations.history", as_user=as_user, params=params)
 
-    def open_dm(self, user: str) -> Dict[str, Any]:
+    def open_dm(self, user: str, as_user: Optional[bool] = None) -> Dict[str, Any]:
         """
         Open (or return) a direct-message channel with a user.
 
         Args:
             user: User ID
+            as_user: Token override; None → user token (opens *your* DM with the
+                person so you can read it), falling through to bot if no user token.
 
         Returns:
             Response data with "channel.id" usable as channel for post_message
         """
-        return self._request("POST", "conversations.open", json={"users": user})
+        if as_user is None:
+            as_user = self._prefer(want_user=True)
+        return self._request("POST", "conversations.open", as_user=as_user, json={"users": user})
 
-    def find_user_by_email(self, email: str) -> Dict[str, Any]:
+    def find_user_by_email(self, email: str, as_user: Optional[bool] = None) -> Dict[str, Any]:
         """
         Look up a user by email.
 
         Args:
             email: Email address
+            as_user: Token override; None → bot (either token works).
 
         Returns:
             User data
         """
-        return self._request("GET", "users.lookupByEmail", params={"email": email})
+        if as_user is None:
+            as_user = self._prefer(want_user=False)
+        return self._request("GET", "users.lookupByEmail", as_user=as_user, params={"email": email})
 
     def search_messages(self, query: str, count: int = 20) -> Dict[str, Any]:
         """
         Search messages across accessible channels. Requires `search:read` scope
-        (only available on user tokens, not bot tokens).
+        (only available on user tokens, not bot tokens) → always via the user token.
 
         Args:
             query: Slack search query (supports `in:#channel`, `from:@user`, etc.)
@@ -395,7 +432,7 @@ class SlackClient:
         Returns:
             Response data with "messages.matches"
         """
-        return self._request("GET", "search.messages", params={"query": query, "count": count})
+        return self._request("GET", "search.messages", as_user=True, params={"query": query, "count": count})
 
     def file_info(self, file_id: str) -> Dict[str, Any]:
         """Get file metadata (requires files:read scope)."""
