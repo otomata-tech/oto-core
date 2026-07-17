@@ -336,8 +336,23 @@ class UnipileClient:
         if industry:
             inc = self._as_facet_ids("INDUSTRY", industry.get("include"))
             exc = self._as_facet_ids("INDUSTRY", industry.get("exclude"))
+            # ⚠️ `classic` n'accepte qu'une liste de secteurs à INCLURE — l'exclusion
+            # n'existe pas (seuls sales_navigator/recruiter prennent {include, exclude}).
+            # On LÈVE plutôt que de concaténer exclude dans include : l'agent demandait
+            # « pas la Banque » et recevait la Banque — FAUX EN SILENCE, sans erreur.
+            if exc and api == "classic":
+                raise UnipileError(
+                    "industry.exclude n'est pas supporté par api='classic' : le param "
+                    "`industry` de la recherche LinkedIn classic n'accepte qu'une liste "
+                    "de secteurs à INCLURE. Retire `exclude`, ou utilise "
+                    "api='sales_navigator' / 'recruiter'."
+                )
             if inc or exc:
-                body["industry"] = inc + exc  # v2 : liste plate d'ids
+                # classic : exc est vide ici (garde ci-dessus) → liste plate d'ids.
+                # TODO(scope Unipile) : sales_navigator/recruiter attendent
+                # {include, exclude} (cf. référence API) — à câbler + valider en 200
+                # quand la feature sera ouverte sur la clé (aujourd'hui 403).
+                body["industry"] = inc + exc
         company_ids = self._as_facet_ids("COMPANY", company)
         if company_ids:
             # v2 people-search : `current_company` (l'employeur courant) ;
