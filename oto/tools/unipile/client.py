@@ -230,6 +230,11 @@ class UnipileClient:
 
     # ---- hosted auth -----------------------------------------------------
 
+    # Produits LinkedIn activables au lien hosted-auth (`config.linkedin.products`).
+    # `classic` = la base, toujours incluse. Les deux PREMIUM sont EXCLUSIFS : un
+    # compte ne peut en activer qu'UN (contrainte Unipile documentée).
+    LINKEDIN_PREMIUM_PRODUCTS = ("recruiter", "sales_navigator")
+
     def hosted_auth_link(
         self,
         notify_url: Optional[str] = None,
@@ -238,13 +243,25 @@ class UnipileClient:
         success_redirect_url: Optional[str] = None,
         failure_redirect_url: Optional[str] = None,
         ttl_minutes: int = 60,
+        premium: Optional[str] = None,
+        allow_cookies: bool = False,
     ) -> str:
         """URL d'auth hébergée (v2 : `POST /v2/auth/link`, createAuthLink).
 
         Schéma v2 : `expires_on` (snake) ; `providers` = liste de codes
         **minuscules** (`["linkedin"]`) ou `"*"` (tous) ; **un seul** `redirect_uri`
         (v2 ne sépare plus succès/échec) ; la réponse porte le lien sur **`link`**.
-        `name`/`notify_url` restent acceptés (corrélation webhook du hosted-auth #131)."""
+        `name`/`notify_url` restent acceptés (corrélation webhook du hosted-auth #131).
+
+        ⚠️ **C'est à l'app d'activer les produits premium** : sans
+        `config.linkedin.products`, Unipile ne connecte que `classic` → les
+        endpoints Recruiter/Sales Navigator répondent 403 « out of your scope » et
+        le wizard n'offre AUCUNE case premium (confirmé par le support Unipile).
+        - `premium` : `"recruiter"` | `"sales_navigator"` | None. **Exclusifs** — un
+          compte ne peut activer qu'un seul des deux.
+        - `allow_cookies` : ajoute la connexion par cookies aux méthodes du wizard
+          (sans lui, seul identifiant/mot de passe est proposé). **Recommandé par
+          Unipile pour les produits premium.**"""
         expires = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
         body: dict[str, Any] = {
             "type": "create",
@@ -261,6 +278,22 @@ class UnipileClient:
             body["notify_url"] = notify_url
         if name:
             body["name"] = name
+        # config.linkedin : produits à activer + méthodes de connexion offertes.
+        # N'est posé que si on demande quelque chose de non-défaut (sinon Unipile
+        # garde son comportement d'origine : classic + credentials).
+        if premium or allow_cookies:
+            if premium and premium not in self.LINKEDIN_PREMIUM_PRODUCTS:
+                raise UnipileError(
+                    f"premium invalide : {premium!r} (attendu "
+                    f"{' ou '.join(map(repr, self.LINKEDIN_PREMIUM_PRODUCTS))}). "
+                    "Un compte ne peut activer qu'UN produit premium."
+                )
+            cfg: dict[str, Any] = {}
+            if premium:
+                cfg["products"] = ["classic", premium]
+            if allow_cookies:
+                cfg["allow_methods"] = ["credentials", "cookies"]
+            body["config"] = {"linkedin": cfg}
         data = self._request("POST", "/auth/link", json=body)
         return (data or {}).get("link") or (data or {}).get("url", "")
 
