@@ -9,6 +9,7 @@ import pytest
 
 from oto.tools.unipile.client import UnipileError
 from oto.tools.zoho import ZohoAuthError
+from oto.tools.salesforce import SalesforceAuthError
 
 
 def test_unipile_error_carries_http_status():
@@ -37,3 +38,11 @@ def test_zoho_auth_error_shared_by_desk_and_analytics():
     from oto.tools.zohoanalytics import client as analytics
     assert desk.ZohoAuthError is ZohoAuthError
     assert analytics.ZohoAuthError is ZohoAuthError
+
+
+def test_salesforce_auth_error_is_a_401_valueerror():
+    e = SalesforceAuthError("Salesforce OAuth error: invalid_grant")
+    assert e.status_code == 401
+    assert isinstance(e, ValueError)
+    with pytest.raises(ValueError):
+        raise SalesforceAuthError("Salesforce OAuth error: invalid_client")
