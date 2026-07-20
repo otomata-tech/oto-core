@@ -8,6 +8,7 @@ OAuth2 self-client (client_id/client_secret/refresh_token), même mécanique de
 token que Zoho CRM. Toutes les requêtes portent l'en-tête `ZANALYTICS-ORGID`.
 """
 
+import hashlib
 import json
 import time
 from typing import Any, Optional
@@ -17,6 +18,14 @@ import requests
 from ...config import require_secret, get_secret
 from ..common import raise_for_upstream
 from ..zoho import ZohoAuthError
+
+# Cache de token PROCESS-WIDE, keyé par credential (hash de accounts_url|client_id|
+# refresh_token) — #233. Le token Zoho vit ~1h, mais côté serveur une NOUVELLE
+# instance de client est créée à CHAQUE appel MCP → un cache d'INSTANCE seul refait
+# un refresh à chaque appel → rate-limit Zoho sur /oauth/v2/token (400 intermittent).
+# Le cache partagé survit aux instances. Clé = HASH du refresh_token (secret) →
+# isolation entre credentials/utilisateurs, jamais de secret en clair comme clé.
+_TOKEN_CACHE: dict[str, "tuple[str, float]"] = {}
 
 
 class ZohoAnalyticsClient:
@@ -32,9 +41,9 @@ class ZohoAnalyticsClient:
         """Initialise le client.
 
         Credentials passés explicitement (usage serveur multi-utilisateur) ou
-        résolus via `require_secret` (usage CLI). Le token d'accès est mis en
-        cache **en mémoire** sur l'instance — jamais sur disque partagé (fuite
-        entre utilisateurs côté serveur).
+        résolus via `require_secret` (usage CLI). Le token d'accès est mis en cache
+        **en mémoire de process**, keyé par credential (`_TOKEN_CACHE`) — jamais sur
+        disque, jamais partagé entre credentials distincts (clé = hash du secret).
         """
         self.client_id = client_id or require_secret("ZOHO_ANALYTICS_CLIENT_ID")
         self.client_secret = client_secret or require_secret("ZOHO_ANALYTICS_CLIENT_SECRET")
@@ -44,15 +53,19 @@ class ZohoAnalyticsClient:
             "ZOHO_ANALYTICS_API_DOMAIN", "https://analyticsapi.zoho.com")
         self.accounts_url = accounts_url or get_secret(
             "ZOHO_ANALYTICS_ACCOUNTS_URL", "https://accounts.zoho.com")
-        self._access_token: Optional[str] = None
-        self._token_expires_at: float = 0.0
+        self._cred_key = hashlib.sha256(
+            f"{self.accounts_url}|{self.client_id}|{self.refresh_token}".encode()
+        ).hexdigest()
 
     # --- Auth ---
 
     def _get_access_token(self) -> str:
-        """Get a valid access token, refreshing if needed (in-memory cache)."""
-        if self._access_token and self._token_expires_at > time.time() + 60:
-            return self._access_token
+        """Token d'accès valide, rafraîchi au besoin. Cache PROCESS-WIDE keyé par
+        credential (#233) : une nouvelle instance de client par appel serveur ne
+        re-refresh PAS si un token valide est déjà en cache (sinon rate-limit Zoho)."""
+        cached = _TOKEN_CACHE.get(self._cred_key)
+        if cached and cached[1] > time.time() + 60:
+            return cached[0]
 
         resp = requests.post(
             f"{self.accounts_url}/oauth/v2/token",
@@ -68,13 +81,13 @@ class ZohoAnalyticsClient:
         if "error" in token_data:
             raise ZohoAuthError(f"Zoho OAuth error: {token_data['error']}")
 
-        self._access_token = token_data["access_token"]
-        self._token_expires_at = time.time() + token_data.get("expires_in", 3600)
-        return self._access_token
+        token = token_data["access_token"]
+        _TOKEN_CACHE[self._cred_key] = (
+            token, time.time() + token_data.get("expires_in", 3600))
+        return token
 
     def _invalidate_token(self):
-        self._access_token = None
-        self._token_expires_at = 0.0
+        _TOKEN_CACHE.pop(self._cred_key, None)
 
     # --- HTTP ---
 
