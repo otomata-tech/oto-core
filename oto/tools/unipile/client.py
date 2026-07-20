@@ -330,14 +330,18 @@ class UnipileClient:
     def resolve_facet(
         self, facet_type: str, keywords: str, limit: int = 100
     ) -> list[dict]:
-        """Résout un nom en ids de facette LinkedIn (v2 :
-        `GET /v2/{account}/linkedin/search/parameters`)."""
+        """Résout un nom en candidats de facette LinkedIn (v2 :
+        `GET /v2/{account}/linkedin/search/parameters`). Renvoie `[{id, name}]` —
+        le `name` est le LIBELLÉ lisible (« Microsoft Excel »), indispensable pour
+        qu'un agent DÉSAMBIGÜISE (ex. 6 candidats pour « Microsoft Excel ») : la
+        réponse porte le libellé sous `name` (pas `title`, historiquement null)."""
         params = {"type": facet_type, "keywords": keywords, "limit": limit}
         data = self._request(
             "GET", self._acct("/linkedin/search/parameters"), params=params
         )
         items = (data or {}).get("data") or (data or {}).get("items") or []
-        return [{"id": it.get("id"), "title": it.get("title")} for it in items]
+        return [{"id": it.get("id"),
+                 "name": it.get("name") or it.get("title")} for it in items]
 
     def _as_facet_ids(self, facet_type: str, values: Optional[list[str]]) -> list[str]:
         if not values:
