@@ -365,9 +365,18 @@ class UnipileClient:
         """Recherche LinkedIn. `company`/`location`/`industry` = noms (résolus en
         facettes) ou ids numériques."""
         prefix = _API_PREFIX.get(api, _API_PREFIX["classic"])
-        params: dict[str, Any] = {}
+        # #238 : pagination CURSOR-ONLY. Le cursor encode DÉJÀ toute la requête
+        # (mots-clés + facettes). On NE reconstruit PAS le body et on ne re-résout
+        # PAS les facettes (chaque nom→id = un GET amont ; empilés, ils faisaient
+        # timeouter les pages Recruiter à 180s). On renvoie juste le cursor sur
+        # l'endpoint structuré du produit. (Une recherche par `url` ne produit pas de
+        # cursor → toute pagination est structurée.)
         if cursor:
-            params["cursor"] = cursor
+            cat = "companies" if category == "companies" else "people"
+            return self._norm(self._request(
+                "POST", self._acct(f"{prefix}/{cat}"),
+                params={"cursor": cursor}, json={}))
+        params: dict[str, Any] = {}
 
         # Recherche par URL collée : endpoint from-url du produit, corps {url}.
         if url:

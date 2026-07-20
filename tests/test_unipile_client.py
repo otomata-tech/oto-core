@@ -314,6 +314,22 @@ def test_search_companies_path():
     assert rec[0][1] == "/acc/linkedin/search/companies"
 
 
+def test_search_cursor_only_no_body_rebuild():
+    # #238 : sur une PAGE (cursor fourni), on n'envoie QUE le cursor — pas de body ni
+    # de re-résolution de facettes. `company`/`location` sont des NOMS (résolus par
+    # des GET amont normalement) : la présence d'un SEUL appel prouve le court-circuit
+    # (le re-build empilait ces GET → timeout 180s sur Recruiter).
+    rec = []
+    c = _client(canned={"data": []}, recorder=rec)
+    c.search(keywords="CTO", company=["Acme"], location=["Paris"],
+             api="recruiter", cursor="CUR123")
+    assert len(rec) == 1                              # un seul appel amont
+    method, path, params, body = rec[0]
+    assert method == "POST" and path.endswith("/people")
+    assert params == {"cursor": "CUR123"}
+    assert body == {}                                # body VIDE (aucune facette re-résolue)
+
+
 # ---- erreurs propres (#177/#178) ----------------------------------------
 
 def test_network_error_mapped_and_account_sanitized():
