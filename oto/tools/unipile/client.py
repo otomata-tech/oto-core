@@ -57,6 +57,11 @@ DEFAULT_DSN = "api.unipile.com"
 # (connect, read) en secondes — borne le blocage : un socket amont muet faisait
 # pendre l'appel jusqu'au cutoff 300s du client MCP (unipile_me, #114).
 _REQUEST_TIMEOUT = (10, 120)
+# #238 : la recherche Recruiter PAR URL (talent/search) peut PENDRE indéfiniment
+# quand le `searchContextId` de l'URL est expiré/mort côté LinkedIn — l'endpoint ne
+# répond ni erreur ni vide → timeout MCP à 180s, opaque. Read timeout court dédié :
+# on échoue AVANT le plafond MCP avec une erreur PROPRE et actionnable.
+_URL_SEARCH_TIMEOUT = (10, 75)
 
 # Feed d'accueil LinkedIn : LinkedIn n'expose AUCUN endpoint feed côté API
 # Unipile. Le seul chemin est la Magic Route Voyager, exposée en v2 comme le proxy
@@ -169,11 +174,13 @@ class UnipileClient:
         path: str,
         params: Optional[dict] = None,
         json: Optional[dict] = None,
+        timeout: Optional[tuple] = None,
     ) -> Any:
         url = f"{self.base_url}{path}"
         try:
             resp = self.session.request(
-                method, url, params=params, json=json, timeout=_REQUEST_TIMEOUT)
+                method, url, params=params, json=json,
+                timeout=timeout or _REQUEST_TIMEOUT)
         except requests.RequestException as e:
             # DNS/timeout/reset : erreur stable au lieu de fuiter net::ERR_* (#177).
             raise UnipileError(
@@ -380,9 +387,22 @@ class UnipileClient:
 
         # Recherche par URL collée : endpoint from-url du produit, corps {url}.
         if url:
-            return self._norm(self._request(
-                "POST", self._acct(prefix), params=params, json={"url": url}
-            ))
+            try:
+                return self._norm(self._request(
+                    "POST", self._acct(prefix), params=params, json={"url": url},
+                    timeout=_URL_SEARCH_TIMEOUT))
+            except UnipileError as e:
+                # Réseau/timeout SANS status HTTP = l'endpoint from-url n'a jamais
+                # répondu → très probablement un searchContextId expiré/mort (#238).
+                # Erreur PROPRE et actionnable au lieu d'un timeout MCP opaque.
+                if getattr(e, "status_code", None) is None:
+                    raise UnipileError(
+                        "Recherche Recruiter par URL injoignable — le contexte de "
+                        "recherche (searchContextId de l'URL) est probablement expiré "
+                        "côté LinkedIn. Régénère l'URL depuis ton historique Recruiter, "
+                        "ou passe à la recherche STRUCTURÉE (api='recruiter' + "
+                        "keywords/company/location) puis pagine par cursor.") from e
+                raise
 
         cat = "companies" if category == "companies" else "people"
         api_norm = api if api in _API_PREFIX else "classic"

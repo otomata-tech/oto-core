@@ -314,6 +314,34 @@ def test_search_companies_path():
     assert rec[0][1] == "/acc/linkedin/search/companies"
 
 
+def test_search_url_timeout_becomes_clean_error():
+    # #238 (suite) : le mode URL Recruiter peut pendre (searchContextId expiré) → le
+    # timeout réseau (UnipileError SANS status HTTP) devient une erreur ACTIONNABLE,
+    # pas un timeout MCP opaque de 180s.
+    from oto.tools.unipile.client import UnipileClient, UnipileError
+    c = UnipileClient(api_key="k", account_id="acc")
+
+    def _raise(method, path, params=None, json=None, timeout=None):
+        raise UnipileError("Unipile: erreur réseau (ReadTimeout).")  # pas de status_code
+    c._request = _raise  # type: ignore[method-assign]
+    with pytest.raises(UnipileError) as ei:
+        c.search(url="https://www.linkedin.com/talent/search?x", api="recruiter")
+    assert "contexte de recherche" in str(ei.value)
+
+
+def test_search_url_http_error_not_masked():
+    # Une VRAIE erreur HTTP (status présent) n'est PAS transformée en « contexte expiré ».
+    from oto.tools.unipile.client import UnipileClient, UnipileError
+    c = UnipileClient(api_key="k", account_id="acc")
+
+    def _raise(method, path, params=None, json=None, timeout=None):
+        raise UnipileError("Unipile 400: bad request", status_code=400)
+    c._request = _raise  # type: ignore[method-assign]
+    with pytest.raises(UnipileError) as ei:
+        c.search(url="https://x", api="recruiter")
+    assert ei.value.status_code == 400
+
+
 def test_search_cursor_only_no_body_rebuild():
     # #238 : sur une PAGE (cursor fourni), on n'envoie QUE le cursor — pas de body ni
     # de re-résolution de facettes. `company`/`location` sont des NOMS (résolus par
