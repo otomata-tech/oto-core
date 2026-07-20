@@ -228,6 +228,20 @@ class UnipileClient:
             "(et UNIPILE_LINKEDIN_ACCOUNT_ID non défini)."
         )
 
+    def account_alive(self, account_id: str) -> bool:
+        """La SESSION du compte est-elle vivante ? `GET /v2/{account_id}/users/me` :
+        200 = utilisable, 401 = déconnecté (checkpoint / login avorté / cookie mort).
+        Distinct de `status:'running'` du compte, qui peut mentir sur un compte
+        mort-né (wizard abandonné). Sert à ne binder qu'un compte RÉELLEMENT
+        utilisable (un compte mort-né préféré à l'ancien sain = incident vécu)."""
+        try:
+            resp = self.session.request(
+                "GET", f"{self.base_url}/{quote(account_id, safe='')}/users/me",
+                timeout=_REQUEST_TIMEOUT)
+        except requests.RequestException:
+            return False
+        return resp.status_code == 200
+
     # ---- hosted auth -----------------------------------------------------
 
     # Produits LinkedIn activables au lien hosted-auth (`config.linkedin.products`).
@@ -245,6 +259,7 @@ class UnipileClient:
         ttl_minutes: int = 60,
         premium: Optional[str] = None,
         allow_cookies: bool = False,
+        reconnect_account: Optional[str] = None,
     ) -> str:
         """URL d'auth hébergée (v2 : `POST /v2/auth/link`, createAuthLink).
 
@@ -261,10 +276,14 @@ class UnipileClient:
           compte ne peut activer qu'un seul des deux.
         - `allow_cookies` : ajoute la connexion par cookies aux méthodes du wizard
           (sans lui, seul identifiant/mot de passe est proposé). **Recommandé par
-          Unipile pour les produits premium.**"""
+          Unipile pour les produits premium.**
+        - `reconnect_account` : `account_id` d'un compte EXISTANT → `type=reconnect`
+          (rattache le produit/répare la session SUR ce compte) au lieu de `create`
+          (qui ferait un DOUBLON). À utiliser pour activer un premium sur un compte
+          déjà connecté."""
         expires = datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes)
         body: dict[str, Any] = {
-            "type": "create",
+            "type": "reconnect" if reconnect_account else "create",
             "providers": [str(p).lower() for p in providers] if providers else "*",
             "api_url": f"https://{self.dsn}",
             "expires_on": expires.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
@@ -274,6 +293,8 @@ class UnipileClient:
         redirect = success_redirect_url or failure_redirect_url
         if redirect:
             body["redirect_uri"] = redirect
+        if reconnect_account:
+            body["reconnect_account"] = reconnect_account
         if notify_url:
             body["notify_url"] = notify_url
         if name:
@@ -355,6 +376,7 @@ class UnipileClient:
             ))
 
         cat = "companies" if category == "companies" else "people"
+        api_norm = api if api in _API_PREFIX else "classic"
         path = f"{prefix}/{cat}"
         body: dict[str, Any] = {}
         if keywords:
@@ -363,40 +385,68 @@ class UnipileClient:
             ak = {k: v for k, v in advanced_keywords.items() if v}
             if ak:
                 body["advanced_keywords"] = ak
-        location_ids = self._as_facet_ids("LOCATION", location)
-        if location_ids:
-            body["location"] = location_ids
-        if industry:
-            inc = self._as_facet_ids("INDUSTRY", industry.get("include"))
-            exc = self._as_facet_ids("INDUSTRY", industry.get("exclude"))
-            # ⚠️ `classic` n'accepte qu'une liste de secteurs à INCLURE — l'exclusion
-            # n'existe pas (seuls sales_navigator/recruiter prennent {include, exclude}).
-            # On LÈVE plutôt que de concaténer exclude dans include : l'agent demandait
-            # « pas la Banque » et recevait la Banque — FAUX EN SILENCE, sans erreur.
-            if exc and api == "classic":
-                raise UnipileError(
-                    "industry.exclude n'est pas supporté par api='classic' : le param "
-                    "`industry` de la recherche LinkedIn classic n'accepte qu'une liste "
-                    "de secteurs à INCLURE. Retire `exclude`, ou utilise "
-                    "api='sales_navigator' / 'recruiter'."
-                )
-            if inc or exc:
-                # classic : exc est vide ici (garde ci-dessus) → liste plate d'ids.
-                # TODO(scope Unipile) : sales_navigator/recruiter attendent
-                # {include, exclude} (cf. référence API) — à câbler + valider en 200
-                # quand la feature sera ouverte sur la clé (aujourd'hui 403).
-                body["industry"] = inc + exc
-        company_ids = self._as_facet_ids("COMPANY", company)
-        if company_ids:
-            # v2 people-search : `current_company` (l'employeur courant) ;
-            # companies-search n'a pas de filtre employeur.
+        # ⚠️ La FORME des facettes (location/company/industry) diffère par produit
+        # (contrat API v2 vérifié en live) — voir `_facet_field` :
+        #   classic          : liste plate d'ids ["123"] (inclusion seule)
+        #   sales_navigator  : {include:[ids], exclude:[ids]}
+        #   recruiter        : [{id, ...}] (objets)
+        loc = self._facet_field("LOCATION", location, api_norm)
+        if loc is not None:
+            body["location"] = loc
+        ind = self._facet_field(
+            "INDUSTRY", industry, api_norm,
+            dict_input=True,  # `industry` est un dict {include?, exclude?}
+        )
+        if ind is not None:
+            body["industry"] = ind
+        comp = self._facet_field("COMPANY", company, api_norm)
+        if comp is not None:
+            # people-search : filtre EMPLOYEUR courant (`current_company`) ;
+            # companies-search : le filtre société n'existe pas (on l'omet).
             if cat == "people":
-                body["current_company"] = company_ids
+                body["current_company"] = comp
         if cat == "people" and network_distance:
             body["network_distance"] = [int(d) for d in network_distance]
         return self._norm(self._request(
             "POST", self._acct(path), params=params, json=body
         ))
+
+    def _facet_field(self, facet_type: str, value, api: str,
+                     dict_input: bool = False):
+        """Encode un filtre de facette selon le PRODUIT (contrat v2 vérifié en live).
+
+        `value` = liste de noms/ids (défaut) OU dict `{include?, exclude?}` de
+        noms/ids (`dict_input=True`, pour `industry`). Renvoie la valeur prête pour
+        le corps, ou None si rien. `exclude` sur `classic` LÈVE (l'API classic n'a
+        pas d'exclusion — concaténer include+exclude renvoyait les EXCLUS, faux en
+        silence)."""
+        if dict_input:
+            inc = self._as_facet_ids(facet_type, (value or {}).get("include"))
+            exc = self._as_facet_ids(facet_type, (value or {}).get("exclude"))
+        else:
+            inc = self._as_facet_ids(facet_type, value)
+            exc = []
+        if not inc and not exc:
+            return None
+        if api == "classic":
+            if exc:
+                raise UnipileError(
+                    f"exclusion non supportée par api='classic' pour {facet_type.lower()} : "
+                    "l'API LinkedIn classic n'accepte qu'une liste à INCLURE. Retire "
+                    "`exclude`, ou utilise api='sales_navigator' / 'recruiter'.")
+            return inc  # liste plate d'ids
+        if api == "sales_navigator":
+            out: dict[str, Any] = {}
+            if inc:
+                out["include"] = inc
+            if exc:
+                out["exclude"] = exc
+            return out
+        # recruiter : liste d'objets {id} (priority/scope optionnels, non exposés ici).
+        # L'exclusion recruiter se fait via priority=DOESNT_HAVE.
+        objs = [{"id": i} for i in inc]
+        objs += [{"id": i, "priority": "DOESNT_HAVE"} for i in exc]
+        return objs
 
     # ---- profils / sociétés (avec garde anti-mismatch #153) --------------
 
