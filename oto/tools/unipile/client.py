@@ -372,9 +372,12 @@ class UnipileClient:
         url: Optional[str] = None,
         advanced_keywords: Optional[dict] = None,
         industry: Optional[dict] = None,
+        skills: Optional[list] = None,
     ) -> dict:
         """Recherche LinkedIn. `company`/`location`/`industry` = noms (résolus en
-        facettes) ou ids numériques."""
+        facettes) ou ids numériques. `skills` = liste de compétences, chacune un
+        dict `{id, name}` (issu de `resolve_facet`/`unipile_search_facets`) OU un nom
+        (résolu au meilleur candidat) — encodé `[{id, name}]` (forme Recruiter)."""
         prefix = _API_PREFIX.get(api, _API_PREFIX["classic"])
         # #238 : pagination CURSOR-ONLY. Le cursor encode DÉJÀ toute la requête
         # (mots-clés + facettes). On NE reconstruit PAS le body et on ne re-résout
@@ -440,9 +443,33 @@ class UnipileClient:
                 body["current_company"] = comp
         if cat == "people" and network_distance:
             body["network_distance"] = [int(d) for d in network_distance]
+        if cat == "people" and skills:
+            body["skills"] = self._skill_objects(skills)
         return self._norm(self._request(
             "POST", self._acct(path), params=params, json=body
         ))
+
+    def _skill_objects(self, skills: list) -> list[dict]:
+        """Normalise en `[{id, name}]` (forme du body Recruiter, vérifiée : chaque
+        item est un objet à `name` string REQUIS, `id` accepté). Accepte des dicts
+        `{id, name}` (issus de `resolve_facet`/`unipile_search_facets`, l'agent a déjà
+        désambigüisé) ou des noms bruts (résolus au meilleur candidat)."""
+        out: list[dict] = []
+        for s in skills:
+            if isinstance(s, dict):
+                name = s.get("name") or (str(s["id"]) if s.get("id") else None)
+                if not name:
+                    continue
+                obj = {"name": name}
+                if s.get("id"):
+                    obj["id"] = str(s["id"])
+                out.append(obj)
+            else:
+                m = self.resolve_facet("SKILL", str(s))
+                if not m:
+                    raise UnipileError(f"Compétence introuvable : {s!r}")
+                out.append({"id": str(m[0]["id"]), "name": m[0]["name"]})
+        return out
 
     def _facet_field(self, facet_type: str, value, api: str,
                      dict_input: bool = False):
