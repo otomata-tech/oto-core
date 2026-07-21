@@ -376,8 +376,8 @@ class UnipileClient:
     ) -> dict:
         """Recherche LinkedIn. `company`/`location`/`industry`/`skills` = noms (résolus
         en facettes) ou ids numériques ; `industry`/`skills` acceptent aussi un dict
-        `{include?, exclude?}`. `skills` (Recruiter/SN) est encodé comme les autres
-        facettes par produit (recruiter → `[{id}]`, exclusion → `priority DOESNT_HAVE`)."""
+        `{include?, exclude?}`. Les formes d'encodage varient par PRODUIT et par
+        FACETTE (vérifiées live, cf. `_facet_field`) — l'appelant passe juste noms/ids."""
         prefix = _API_PREFIX.get(api, _API_PREFIX["classic"])
         # #238 : pagination CURSOR-ONLY. Le cursor encode DÉJÀ toute la requête
         # (mots-clés + facettes). On NE reconstruit PAS le body et on ne re-résout
@@ -488,10 +488,22 @@ class UnipileClient:
             if exc:
                 out["exclude"] = exc
             return out
-        # recruiter : liste d'objets {id} (priority/scope optionnels, non exposés ici).
-        # L'exclusion recruiter se fait via priority=DOESNT_HAVE.
-        objs = [{"id": i} for i in inc]
-        objs += [{"id": i, "priority": "DOESNT_HAVE"} for i in exc]
+        # recruiter : la forme dépend de la FACETTE (vérifié LIVE, contrat sélectionné) :
+        #   INDUSTRY → objet `{include:[ids], exclude:[ids]}` (comme sales_navigator) ;
+        #   SKILL    → `[{name: <id>}]` — ⚠️ le champ s'appelle `name` mais porte l'ID
+        #              (un `name`=libellé ne filtre PAS ; `{id,...}` lève 400) ;
+        #   LOCATION/COMPANY (défaut) → `[{id}]`.
+        # Exclusion partout via `priority: "DOESNT_HAVE"`.
+        if facet_type == "INDUSTRY":
+            out2: dict[str, Any] = {}
+            if inc:
+                out2["include"] = inc
+            if exc:
+                out2["exclude"] = exc
+            return out2
+        key = "name" if facet_type == "SKILL" else "id"
+        objs = [{key: i} for i in inc]
+        objs += [{key: i, "priority": "DOESNT_HAVE"} for i in exc]
         return objs
 
     # ---- profils / sociétés (avec garde anti-mismatch #153) --------------

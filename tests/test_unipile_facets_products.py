@@ -67,12 +67,23 @@ def test_industry_sales_navigator_include_exclude():
     assert rec[0]["json"]["industry"] == {"include": ["id-Tech"], "exclude": ["id-Bank"]}
 
 
-def test_industry_recruiter_exclude_via_priority():
+def test_industry_recruiter_is_object():
+    # recruiter industry = objet {include, exclude} (comme sales_nav), PAS [{id}]
+    # (vérifié live : `[{id}]` → 400 "Expected object").
     rec = []
     _client(rec).search(keywords="x", api="recruiter",
                         industry={"include": ["Tech"], "exclude": ["Bank"]})
-    assert rec[0]["json"]["industry"] == [
-        {"id": "id-Tech"}, {"id": "id-Bank", "priority": "DOESNT_HAVE"}]
+    assert rec[0]["json"]["industry"] == {"include": ["id-Tech"], "exclude": ["id-Bank"]}
+
+
+def test_skills_recruiter_name_holds_id():
+    # recruiter skills = [{name: <id>}] — le champ `name` porte l'ID (vérifié live :
+    # `[{name: libellé}]` ne filtre pas ; `[{id,...}]` → 400). Exclusion = priority.
+    rec = []
+    _client(rec).search(keywords="x", api="recruiter",
+                        skills={"include": ["Excel"], "exclude": ["VBA"]})
+    assert rec[0]["json"]["skills"] == [
+        {"name": "id-Excel"}, {"name": "id-VBA", "priority": "DOESNT_HAVE"}]
 
 
 # ---- account_alive --------------------------------------------------------
