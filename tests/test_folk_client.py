@@ -117,3 +117,32 @@ def test_get_user_me_alias(c, calls):
 def test_get_user_by_id(c, calls):
     c.get_user("usr_42")
     assert calls[-1]["url"] == f"{BASE}/users/usr_42"
+
+
+# --- Notes / reminders : filtre par entité côté client (oto-backend#224) ----
+# L'API Folk ignore filter[entity.id][eq] → on récupère tout et on filtre sur
+# entity.id. On patche _paginate pour isoler la logique de filtrage.
+
+_NOTES = [
+    {"id": "nte_1", "entity": {"id": "per_A"}},
+    {"id": "nte_2", "entity": {"id": "com_B"}},
+    {"id": "nte_3", "entity": {"id": "per_A"}},
+    {"id": "nte_4"},  # sans entité → jamais retenu par un filtre
+]
+
+
+def test_list_notes_filters_by_entity_client_side(c, monkeypatch):
+    monkeypatch.setattr(c, "_paginate", lambda ep, params=None: list(_NOTES))
+    out = c.list_notes(entity_id="per_A")
+    assert [n["id"] for n in out] == ["nte_1", "nte_3"]
+
+
+def test_list_notes_no_filter_returns_all(c, monkeypatch):
+    monkeypatch.setattr(c, "_paginate", lambda ep, params=None: list(_NOTES))
+    assert len(c.list_notes()) == 4
+
+
+def test_list_reminders_filters_by_entity_client_side(c, monkeypatch):
+    monkeypatch.setattr(c, "_paginate", lambda ep, params=None: list(_NOTES))
+    out = c.list_reminders(entity_id="com_B")
+    assert [r["id"] for r in out] == ["nte_2"]

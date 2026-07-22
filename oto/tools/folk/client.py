@@ -172,10 +172,14 @@ class FolkClient:
     # --- Notes ---
 
     def list_notes(self, entity_id: str = None) -> List[Dict]:
-        params = {}
+        # L'API Folk IGNORE `filter[entity.id][eq]` sur /notes (vérifié
+        # empiriquement : le param est accepté sans erreur mais renvoie tout le
+        # workspace). On filtre donc côté client sur l'entité rattachée
+        # (chaque note porte `entity.id`). oto-backend#224.
+        notes = self._paginate("notes", {})
         if entity_id:
-            params["filter[entity.id][eq]"] = entity_id
-        return self._paginate("notes", params)
+            notes = [n for n in notes if (n.get("entity") or {}).get("id") == entity_id]
+        return notes
 
     def create_note(self, entity_id: str, content: str, visibility: str = "public") -> Dict:
         return self._request("POST", "notes", json={
@@ -208,10 +212,12 @@ class FolkClient:
     # --- Reminders ---
 
     def list_reminders(self, entity_id: str = None) -> List[Dict]:
-        params = {}
+        # Même bug que list_notes : le filtre serveur par entité est ignoré →
+        # on filtre côté client sur `entity.id`. oto-backend#224.
+        reminders = self._paginate("reminders", {})
         if entity_id:
-            params["filter[entity.id][eq]"] = entity_id
-        return self._paginate("reminders", params)
+            reminders = [r for r in reminders if (r.get("entity") or {}).get("id") == entity_id]
+        return reminders
 
     def create_reminder(self, entity_id: str, name: str,
                         recurrence_rule: str, visibility: str = "public") -> Dict:
