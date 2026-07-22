@@ -1,9 +1,14 @@
 """
 FullEnrich API Client — waterfall multi-provider contact enrichment.
 
-Async bulk API: POST job → poll until FINISHED (~30s-4min).
+Async bulk API: POST job → GET status (FINISHED after ~30s-4min).
 Pricing: 10 cr/phone, 1 cr/work_email, 3 cr/personal_email (pay-per-result).
 Phone hit rate ~70% vs Kaspr ~13%.
+
+⚠️ Surface async assumée (signal #252, 2026-07-22) : l'ancien `enrich_linkedin`
+synchrone pollait in-process (131-147s mesurés) → tout client MCP raccroche avant
+(~60s), résultat perdu ET crédits consommés. Le couple `submit`/`fetch` rend chaque
+appel court ; le POLLING appartient à l'APPELANT (agent), pas au client HTTP.
 
 Requires: requests
 """
@@ -11,11 +16,15 @@ Requires: requests
 from __future__ import annotations
 
 import time
-from typing import Optional
 
 import requests
 
 from ...config import require_secret
+
+# Plafond de l'endpoint bulk FullEnrich (contacts par job).
+MAX_CONTACTS_PER_JOB = 100
+
+DEFAULT_ENRICH_FIELDS = ["contact.work_emails", "contact.phones"]
 
 
 class FullenrichProfile:
@@ -23,7 +32,7 @@ class FullenrichProfile:
 
     def __init__(
         self,
-        linkedin_slug: str,
+        linkedin_slug: str | None,
         first_name: str | None = None,
         last_name: str | None = None,
         full_name: str | None = None,
@@ -49,8 +58,13 @@ class FullenrichProfile:
         self.raw_data = raw_data
         self.fetched_at = fetched_at
 
+    @property
+    def found(self) -> bool:
+        return bool(self.phones or self.work_emails or self.personal_emails)
+
     def to_dict(self) -> dict:
         return {
+            "found": self.found,
             "linkedin_slug": self.linkedin_slug,
             "first_name": self.first_name,
             "last_name": self.last_name,
@@ -67,8 +81,6 @@ class FullenrichProfile:
 
 class FullenrichClient:
     BASE_URL = "https://app.fullenrich.com/api/v2"
-    POLL_INTERVAL_S = 8
-    MAX_POLLS = 30
 
     def __init__(self, api_key: str | None = None):
         self.api_key = api_key or require_secret("FULLENRICH_API_KEY")
@@ -79,31 +91,46 @@ class FullenrichClient:
             "Content-Type": "application/json",
         }
 
-    def enrich_linkedin(
+    def submit(
         self,
-        linkedin_slug: str,
-        first_name: str,
-        last_name: str,
-        company_name: Optional[str] = None,
-    ) -> FullenrichProfile | None:
-        """Enrich a LinkedIn profile. Returns None if no data found."""
-        slug = linkedin_slug.strip().strip("/")
-        linkedin_url = f"https://www.linkedin.com/in/{slug}/"
+        contacts: list[dict],
+        enrich_fields: list[str] | None = None,
+    ) -> str:
+        """Soumet un job d'enrichissement bulk. Retourne l'enrichment_id (le job
+        tourne côté FullEnrich, ~30s-4min ; récupérer via `fetch`).
 
-        payload = {
-            "name": f"oto-{int(time.time())}",
-            "data": [
-                {
-                    "first_name": first_name,
-                    "last_name": last_name,
-                    **({"company_name": company_name} if company_name else {}),
-                    "linkedin_url": linkedin_url,
-                    "enrich_fields": ["contact.work_emails", "contact.phones"],
-                    "custom": {"slug": slug},
-                }
-            ],
-        }
+        contacts: [{first_name, last_name, linkedin_slug?, company_name?}, ...]
+        """
+        if not contacts:
+            raise ValueError("FullEnrich submit: aucun contact fourni.")
+        if len(contacts) > MAX_CONTACTS_PER_JOB:
+            raise ValueError(
+                f"FullEnrich submit: {len(contacts)} contacts > plafond "
+                f"{MAX_CONTACTS_PER_JOB}/job — découper en plusieurs jobs."
+            )
+        fields = enrich_fields or DEFAULT_ENRICH_FIELDS
 
+        data = []
+        for c in contacts:
+            first_name, last_name = c.get("first_name"), c.get("last_name")
+            if not first_name or not last_name:
+                raise ValueError(
+                    f"FullEnrich submit: first_name et last_name requis par contact (reçu {c!r})."
+                )
+            entry: dict = {
+                "first_name": first_name,
+                "last_name": last_name,
+                "enrich_fields": fields,
+            }
+            slug = (c.get("linkedin_slug") or "").strip().strip("/")
+            if slug:
+                entry["linkedin_url"] = f"https://www.linkedin.com/in/{slug}/"
+                entry["custom"] = {"slug": slug}
+            if c.get("company_name"):
+                entry["company_name"] = c["company_name"]
+            data.append(entry)
+
+        payload = {"name": f"oto-{int(time.time())}", "data": data}
         resp = requests.post(
             f"{self.BASE_URL}/contact/enrich/bulk",
             headers=self._headers(),
@@ -116,50 +143,42 @@ class FullenrichClient:
         enrichment_id = resp.json().get("enrichment_id")
         if not enrichment_id:
             raise RuntimeError(f"FullEnrich POST: no enrichment_id in response: {resp.text[:200]}")
+        return enrichment_id
 
-        return self._poll(enrichment_id, slug)
+    def fetch(self, enrichment_id: str) -> dict:
+        """Un GET de statut, sans attente. Retourne
+        `{"status": <str>, "profiles": [FullenrichProfile] | None}` —
+        `profiles` n'est peuplé que si status == FINISHED."""
+        resp = requests.get(
+            f"{self.BASE_URL}/contact/enrich/bulk/{enrichment_id}",
+            headers=self._headers(),
+            timeout=30,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"FullEnrich GET {resp.status_code}: {resp.text[:200]}")
 
-    def _poll(self, enrichment_id: str, slug: str) -> FullenrichProfile | None:
-        for _ in range(self.MAX_POLLS):
-            time.sleep(self.POLL_INTERVAL_S)
+        body = resp.json()
+        status = body.get("status", "")
 
-            resp = requests.get(
-                f"{self.BASE_URL}/contact/enrich/bulk/{enrichment_id}",
-                headers=self._headers(),
-                timeout=30,
-            )
-            if resp.status_code != 200:
-                raise RuntimeError(f"FullEnrich GET {resp.status_code}: {resp.text[:200]}")
+        if status == "CREDITS_INSUFFICIENT":
+            raise RuntimeError("FullEnrich : crédits insuffisants. Recharger sur app.fullenrich.com.")
 
-            body = resp.json()
-            status = body.get("status", "")
+        if status != "FINISHED":
+            return {"status": status, "profiles": None}
 
-            if status == "CREDITS_INSUFFICIENT":
-                raise RuntimeError("FullEnrich : crédits insuffisants. Recharger sur app.fullenrich.com.")
+        profiles = [self._parse(item) for item in body.get("data", [])]
+        return {"status": status, "profiles": profiles}
 
-            if status != "FINISHED":
-                continue
-
-            data_list = body.get("data", [])
-            if not data_list:
-                return None
-
-            return self._parse(data_list[0], slug, body)
-
-        raise RuntimeError("FullEnrich : timeout polling (>4 min)")
-
-    def _parse(self, item: dict, slug: str, raw: dict) -> FullenrichProfile | None:
+    def _parse(self, item: dict) -> FullenrichProfile:
         contact = item.get("contact_info") or {}
         profile = item.get("profile") or {}
         employment = (profile.get("employment") or {}).get("all") or []
         loc = profile.get("location") or {}
+        slug = (item.get("custom") or {}).get("slug")
 
         phones = [p["number"] for p in (contact.get("phones") or []) if p.get("number")]
         work_emails = [e["email"] for e in (contact.get("work_emails") or []) if e.get("email")]
         personal_emails = [e["email"] for e in (contact.get("personal_emails") or []) if e.get("email")]
-
-        if not phones and not work_emails and not personal_emails:
-            return None
 
         title = employment[0].get("title") if employment else None
         company = employment[0].get("company", {}).get("name") if employment else None
@@ -179,6 +198,6 @@ class FullenrichClient:
             work_emails=work_emails,
             personal_emails=personal_emails,
             location=location_str,
-            raw_data=raw,
+            raw_data=item,
             fetched_at=datetime.now(timezone.utc).isoformat(),
         )
