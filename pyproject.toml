@@ -11,7 +11,9 @@ license = { text = "MIT" }
 requires-python = ">=3.10"
 urls = { Homepage = "https://oto.ninja", Repository = "https://github.com/otomata-tech/oto-core" }
 dependencies = [
-    "requests>=2.28.0",
+    # Floor >=2.32.4 : CVE-2024-47081 (.netrc credential leak), CVE-2024-35195
+    # (cert verification bypass on session reuse), CVE-2023-32681 (Proxy-Authorization leak).
+    "requests>=2.32.4",
     "france-opendata>=0.7.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0",
@@ -23,7 +25,9 @@ google = ["google-auth>=2.0.0", "google-auth-oauthlib>=1.0.0", "google-api-pytho
 browser = ["o-browser"]
 vivatech = ["o-browser-vivatech"]
 anthropic = ["anthropic>=0.40.0"]
-stock = ["pyarrow>=10.0.0", "pandas>=1.5.0"]
+# pyarrow floor >=14.0.1 : CVE-2023-47248 (arbitrary code execution when
+# deserializing untrusted Parquet/IPC data).
+stock = ["pyarrow>=14.0.1", "pandas>=1.5.0"]
 anonymize = ["faker>=20.0.0"]
 # `cli` = the Typer command surfaces under oto.tools.*.commands, mounted by the
 # oto-cli façade. They import typer, which core clients never do — declare it so
