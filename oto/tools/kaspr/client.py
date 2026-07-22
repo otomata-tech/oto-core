@@ -33,6 +33,11 @@ class KasprClient:
     """
 
     BASE_URL = "https://api.developers.kaspr.io"
+    # (connect, read) — Kaspr répond <1s en nominal ; sans read-timeout un blip
+    # amont laisse l'appel suspendu POUR TOUJOURS (thread perdu, jamais loggé —
+    # vécu 2026-07-22, signal #252 : appel invisible du calllog, client MCP parti
+    # à 60s, serveur pendu). Un timeout transforme le blip en erreur actionnable.
+    TIMEOUT = (10, 50)
 
     def __init__(self, api_key: str = None):
         """
@@ -52,6 +57,7 @@ class KasprClient:
             "accept-version": "v2.0",
         }
 
+        kwargs.setdefault("timeout", self.TIMEOUT)
         response = requests.request(method, url, headers=headers, **kwargs)
         response.raise_for_status()
         return response.json()
