@@ -11,23 +11,23 @@ license = { text = "MIT" }
 requires-python = ">=3.10"
 urls = { Homepage = "https://oto.ninja", Repository = "https://github.com/otomata-tech/oto-core" }
 dependencies = [
-    # Floor >=2.32.4 : CVE-2024-47081 (.netrc credential leak), CVE-2024-35195
-    # (cert verification bypass on session reuse), CVE-2023-32681 (Proxy-Authorization leak).
-    "requests>=2.32.4",
+    # Floor >=2.33.0 : CVE-2026-25645, CVE-2024-47081 (.netrc leak), CVE-2024-35195
+    # (cert verification bypass), CVE-2023-32681 (Proxy-Authorization leak).
+    "requests>=2.33.0",
     "france-opendata>=0.7.0",
-    "python-dotenv>=1.0.0",
+    "python-dotenv>=1.2.2",  # CVE-2026-28684
     "pyyaml>=6.0",
     "defusedxml>=0.7.1",
 ]
 
 [project.optional-dependencies]
-google = ["google-auth>=2.0.0", "google-auth-oauthlib>=1.0.0", "google-api-python-client>=2.0.0", "gkeepapi>=0.16.0", "markdown>=3.5"]
+google = ["google-auth>=2.0.0", "google-auth-oauthlib>=1.0.0", "google-api-python-client>=2.0.0", "gkeepapi>=0.16.0", "markdown>=3.8.1"]  # markdown : CVE-2025-69534
 browser = ["o-browser"]
 vivatech = ["o-browser-vivatech"]
 anthropic = ["anthropic>=0.40.0"]
-# pyarrow floor >=14.0.1 : CVE-2023-47248 (arbitrary code execution when
-# deserializing untrusted Parquet/IPC data).
-stock = ["pyarrow>=14.0.1", "pandas>=1.5.0"]
+# pyarrow floor >=23.0.1 : CVE-2023-47248 + CVE-2024-52338 (RCE on untrusted
+# Parquet/IPC) + GHSA-rgxp-2hwp-jwgg (use-after-free reading pre-buffered IPC).
+stock = ["pyarrow>=23.0.1", "pandas>=1.5.0"]
 anonymize = ["faker>=20.0.0"]
 # `cli` = the Typer command surfaces under oto.tools.*.commands, mounted by the
 # oto-cli façade. They import typer, which core clients never do — declare it so
@@ -41,8 +41,7 @@ include = ["oto*"]
 namespaces = true
 
 # Fichiers chargés à l'exécution via Path(__file__) — sans eux, un install
-# PyPI casse load_naf_codes(), le rendu PDF et le bridge WhatsApp.
+# PyPI casse load_naf_codes() et le rendu PDF.
 [tool.setuptools.package-data]
 "oto.tools.sirene" = ["data/*.txt"]
 "oto.tools.pdf" = ["templates/*.css"]
-"oto.tools.whatsapp" = ["node/package.json", "node/package-lock.json", "node/*.mjs"]
