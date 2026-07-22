@@ -32,7 +32,7 @@ def test_submit_bulk_payload(monkeypatch):
     eid = c.submit([
         {"first_name": "Mathias", "last_name": "Mimouna",
          "linkedin_slug": "mathias-mimouna-240b1212b", "company_name": "Acme"},
-        {"first_name": "Carole", "last_name": "Rosenberger"},
+        {"first_name": "Carole", "last_name": "Rosenberger", "domain": "acme.fr"},
     ])
 
     assert eid == "abc123"
@@ -45,6 +45,7 @@ def test_submit_bulk_payload(monkeypatch):
     assert data[0]["company_name"] == "Acme"
     assert data[0]["enrich_fields"] == fe.DEFAULT_ENRICH_FIELDS
     assert "linkedin_url" not in data[1]
+    assert data[1]["domain"] == "acme.fr"
 
 
 def test_submit_guards():
@@ -55,6 +56,8 @@ def test_submit_guards():
         c.submit([{"first_name": "A", "last_name": "B"}] * (fe.MAX_CONTACTS_PER_JOB + 1))
     with pytest.raises(ValueError, match="first_name et last_name"):
         c.submit([{"first_name": "A"}])
+    with pytest.raises(ValueError, match="linkedin_slug OU domain"):
+        c.submit([{"first_name": "A", "last_name": "B"}])
 
 
 def test_fetch_in_progress(monkeypatch):

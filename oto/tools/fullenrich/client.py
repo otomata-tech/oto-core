@@ -99,7 +99,10 @@ class FullenrichClient:
         """Soumet un job d'enrichissement bulk. Retourne l'enrichment_id (le job
         tourne côté FullEnrich, ~30s-4min ; récupérer via `fetch`).
 
-        contacts: [{first_name, last_name, linkedin_slug?, company_name?}, ...]
+        contacts: [{first_name, last_name, linkedin_slug?, company_name?, domain?}, ...]
+        Chaque contact doit porter `linkedin_slug` OU `domain` (site de
+        l'entreprise) — l'API FullEnrich rejette sinon le job entier
+        (`error.enrichment.domain.empty`, vérifié live 2026-07-22).
         """
         if not contacts:
             raise ValueError("FullEnrich submit: aucun contact fourni.")
@@ -126,6 +129,13 @@ class FullenrichClient:
             if slug:
                 entry["linkedin_url"] = f"https://www.linkedin.com/in/{slug}/"
                 entry["custom"] = {"slug": slug}
+            if c.get("domain"):
+                entry["domain"] = c["domain"]
+            if not slug and not c.get("domain"):
+                raise ValueError(
+                    f"FullEnrich submit: linkedin_slug OU domain requis par contact "
+                    f"(l'API rejette sinon le job entier ; reçu {c!r})."
+                )
             if c.get("company_name"):
                 entry["company_name"] = c["company_name"]
             data.append(entry)
