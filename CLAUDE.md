@@ -3,8 +3,8 @@
 **Lib de connecteurs Oto** — clients API pour agents IA, **sans CLI**. Repo **public** (`otomata-tech/oto-core`), **open source**. Split d'oto-cli le 2026-06-11 (otomata#13).
 
 Namespace package `oto` (PEP 420, **pas d'`oto/__init__.py`**) :
-- `oto.tools.*` — les clients (serper, attio, hunter, google, linkedin via o-browser, pennylane, reddit, slack, whatsapp, gocardless, sirene/inpi/bodacc/boamp/dvf/culture via france-opendata…).
-- `oto.config` — résolution de secrets 3-tier (env → SOPS/file/scaleway → défaut) ; `oto.sops_secrets`, `oto.scaleway_secrets`.
+- `oto.tools.*` — les clients (serper, attio, hunter, google, linkedin via o-browser, pennylane, reddit, slack, gocardless, sirene/inpi/bodacc/boamp/dvf/culture via france-opendata…). Messagerie (WhatsApp/LinkedIn) = Unipile côté backend ; le bridge WhatsApp Baileys (Node) a été retiré le 2026-07-22 (fallback archivé, deps npm vulnérables).
+- `oto.config` — résolution de secrets 3-tier (env → SOPS/file/scaleway → défaut). `config.get_secret` orchestre ; les providers vivent dans le package `oto.secrets` (`sops`/`scaleway`/`file`), sélectionnés par la factory `oto.secrets.make_provider`.
 
 ## Place dans l'écosystème
 
@@ -25,10 +25,17 @@ Donc : un connecteur = un client ici, plusieurs faces (CLI, MCP). [[meta otomata
 ```
 oto/                      # namespace (PAS d'__init__.py)
 ├── tools/                # 1 dossier/connecteur : <svc>/client.py (+ lib/ pour google)
-├── config.py             # get_secret/require_secret (env → provider → défaut)
-├── sops_secrets.py       # provider SOPS+age
-└── scaleway_secrets.py   # provider Secret Manager
+├── config.py             # get_secret/require_secret (orchestrateur : env → provider → fallback fichier → défaut)
+└── secrets/              # providers de secrets + factory
+    ├── __init__.py       # make_provider(name, cfg) — factory + registre
+    ├── base.py           # protocole SecretProvider + sentinelles (MISSING/STORE_ABSENT) + AmbiguousSecretError
+    ├── sops.py           # provider SOPS+age (SopsProvider)
+    ├── scaleway.py       # provider Secret Manager (ScalewayProvider)
+    └── file.py           # provider fichier .otomata/secrets.env (FileProvider)
 ```
+
+Ajouter un provider = un module exposant `lookup(name)` + une ligne au registre
+`oto/secrets/__init__.py` — zéro branche `if provider ==` dans `oto.config`.
 
 ## Conventions
 
@@ -40,4 +47,4 @@ oto/                      # namespace (PAS d'__init__.py)
 ## Gotchas
 
 - **Namespace cross-package** : oto-core fournit `oto.tools`/`oto.config`, oto-cli fournit `oto.cli`/`oto.commands`. Les deux installés editable cohabitent dans le même `oto`. Changer le pyproject d'un des deux → **réinstaller editable** (le finder setuptools suit le pyproject).
-- **Sur PyPI depuis 1.6.0** (2026-06-13, promesse ADR 0005). Release = bump version pyproject → build+twine depuis `git archive HEAD` (recette meta-repo ; hatch cassé sur cette machine). ⚠️ **Toujours bumper le champ `version` AVEC le tag** : un tag `vX.Y.Z` créé sans bumper `version` (resté en dessous) fait mentir `pip show oto-core` (vu le 2026-06-22 : tag v1.7.0 sur code à `version="1.6.1"` → prod affichait 1.6.1 malgré le bon code → fausse piste « bump non appliqué »). oto-backend pin oto-core par **tag git** (`@vX.Y.Z`) ; bump = nouveau tag + édit du pin backend. ⚠️ Les data files runtime (`sirene/data`, `pdf/templates`, `whatsapp/node/{package*.json,*.mjs}`) sont déclarés en `package-data` — tout nouveau fichier chargé via `Path(__file__)` doit y être ajouté, sinon la wheel casse. Les installs editable (box, oto-cli local) ne sont PAS affectés par un publish — `git pull` requis.
+- **Sur PyPI depuis 1.6.0** (2026-06-13, promesse ADR 0005). Release = bump version pyproject → build+twine depuis `git archive HEAD` (recette meta-repo ; hatch cassé sur cette machine). ⚠️ **Toujours bumper le champ `version` AVEC le tag** : un tag `vX.Y.Z` créé sans bumper `version` (resté en dessous) fait mentir `pip show oto-core` (vu le 2026-06-22 : tag v1.7.0 sur code à `version="1.6.1"` → prod affichait 1.6.1 malgré le bon code → fausse piste « bump non appliqué »). oto-backend pin oto-core par **tag git** (`@vX.Y.Z`) ; bump = nouveau tag + édit du pin backend. ⚠️ Les data files runtime (`sirene/data`, `pdf/templates`) sont déclarés en `package-data` — tout nouveau fichier chargé via `Path(__file__)` doit y être ajouté, sinon la wheel casse. Les installs editable (box, oto-cli local) ne sont PAS affectés par un publish — `git pull` requis.

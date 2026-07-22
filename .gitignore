@@ -3,6 +3,9 @@ __pycache__/
 *.pyc
 *.pyo
 
+# Node (whatsapp Baileys fallback) — régénéré par _ensure_deps (npm install)
+node_modules/
+
 # Packaging
 *.egg-info/
 build/
