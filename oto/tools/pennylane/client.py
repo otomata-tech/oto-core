@@ -27,7 +27,7 @@ from typing import Optional
 import requests
 
 from ...config import require_secret
-from ..common import FieldFilter
+from ..common import FieldFilter, UpstreamHTTPError
 
 
 def _is_outstanding(transaction) -> bool:
@@ -224,8 +224,19 @@ class PennylaneClient:
             data = self.fetch(endpoint, params)
             time.sleep(self.rate_limit_delay)
 
+            # Une erreur amont (401 clé périmée, 4xx/5xx, réseau) NE DOIT PAS être
+            # avalée en liste vide : sinon un consommateur anti-doublon (ex.
+            # find_invoice_by_external_reference) confond « erreur d'auth » et
+            # « aucun résultat » et recrée des avoirs en double (oto-backend#223).
+            # On lève — UpstreamHTTPError si un status HTTP est porté (le backend
+            # le classe en erreur connecteur gérée via `.status_code`), sinon une
+            # erreur générique (réseau / max retries) qui remonte tout de même.
             if isinstance(data, dict) and 'error' in data:
-                break
+                status = data.get('status_code')
+                if isinstance(status, int):
+                    raise UpstreamHTTPError(status, data.get('details') or data['error'],
+                                            service="pennylane")
+                raise RuntimeError(f"pennylane: {data['error']}")
 
             if isinstance(data, dict) and 'items' in data:
                 items = data['items']
