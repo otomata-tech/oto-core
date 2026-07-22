@@ -13,7 +13,7 @@ from oto.tools.unipile.client import UnipileError
 def _client(recorder=None):
     c = UnipileClient(api_key="k", account_id="acc")
 
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         if recorder is not None:
             recorder.append({"path": path, "json": json})
         return {"data": []}

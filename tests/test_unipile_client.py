@@ -23,7 +23,7 @@ def _client(canned=None, recorder=None):
     tuples d'appel."""
     c = UnipileClient(api_key="k", account_id="acc")
 
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         if recorder is not None:
             recorder.append((method, path, params, json))
         if callable(canned):
@@ -40,7 +40,7 @@ def _seq_client(responses):
     c = UnipileClient(api_key="k", account_id="acc")
     calls: list[dict] = []
 
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         calls.append({"method": method, "path": path, "params": params or {}})
         for i, (m, p, payload) in enumerate(responses):
             if m == method and p == path:
@@ -131,7 +131,7 @@ def test_get_company_rejects_user_object():
 def _company_stub(known_slug, search_hits):
     """Stub `_request` : GET company connu → 200 ; GET inconnu → 404 ;
     POST search/companies → `search_hits`."""
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         if method == "POST" and path.endswith("/linkedin/search/companies"):
             return {"data": search_hits}
         if method == "GET" and path.endswith(f"/linkedin/company/{known_slug}"):
@@ -162,7 +162,7 @@ def test_get_company_404_lists_candidates_when_retry_fails():
     # Search rend des candidats mais aucun ne résout → 404 propre + candidats.
     c = _client()
 
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         if method == "POST" and path.endswith("/linkedin/search/companies"):
             return {"data": [{"public_identifier": "other-co"}]}
         raise UnipileError("Unipile 404: Company not found", status_code=404)
@@ -179,7 +179,7 @@ def test_get_company_numeric_id_no_fallback():
     calls = []
     c = _client()
 
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         calls.append((method, path))
         raise UnipileError("Unipile 404: Company not found", status_code=404)
 
@@ -193,7 +193,7 @@ def test_get_company_resolve_false_disables_fallback():
     calls = []
     c = _client()
 
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         calls.append(path)
         raise UnipileError("Unipile 404: Company not found", status_code=404)
 
@@ -421,7 +421,7 @@ def test_hosted_auth_link_providers_wildcard_when_none():
 # ---- posts/comments/reactions : slug public → provider_id URN (delta v2) --------
 
 def _member_stub(recorder):
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         recorder.append((method, path, params, json))
         if path.endswith("/users/john-doe"):         # get_profile(slug)
             return {"object": "UserProfile", "public_identifier": "john-doe",

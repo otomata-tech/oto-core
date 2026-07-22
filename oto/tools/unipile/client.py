@@ -62,6 +62,11 @@ _REQUEST_TIMEOUT = (10, 120)
 # répond ni erreur ni vide → timeout MCP à 180s, opaque. Read timeout court dédié :
 # on échoue AVANT le plafond MCP avec une erreur PROPRE et actionnable.
 _URL_SEARCH_TIMEOUT = (10, 75)
+# Scrape (recherche structurée + fiche société) : LinkedIn/Unipile peut faire
+# PENDRE l'appel ~120s (surcharge / rate-limit qui queue) — vécu 2026-07-21, 166
+# ReadTimeout de 121s qui gelaient l'agent 2 min chacun. Read timeout court dédié :
+# échouer vite (60s) avec une erreur actionnable plutôt que geler.
+_SCRAPE_TIMEOUT = (10, 60)
 
 # Feed d'accueil LinkedIn : LinkedIn n'expose AUCUN endpoint feed côté API
 # Unipile. Le seul chemin est la Magic Route Voyager, exposée en v2 comme le proxy
@@ -140,6 +145,28 @@ class UnipileError(RuntimeError):
         self.status_code = status_code
 
 
+class UnipileRateLimited(UnipileError):
+    """429 Unipile : quota amont atteint. LinkedIn cappe les fiches société/profil
+    à ~100/12h PAR COMPTE (« We only allow 100 requests. Retry in N hours »). Type
+    dédié + délai parsé → l'appelant STOPPE au lieu de marteler (251 appels perdus
+    en 12h vécu 2026-07-21). `retry_after` = secondes avant réessai, None si illisible."""
+
+    def __init__(self, message: str, retry_after: Optional[int] = None):
+        super().__init__(message, status_code=429)
+        self.retry_after = retry_after
+
+
+_RETRY_RE = re.compile(r"retry in\s+(\d+)\s*(hour|hr|minute|min|second|sec)", re.I)
+
+
+def _parse_retry_after(msg: str) -> Optional[int]:
+    """Secondes avant réessai depuis un corps 429 (« Retry in 12 hours »). None sinon."""
+    m = _RETRY_RE.search(msg or "")
+    if not m:
+        return None
+    return int(m.group(1)) * {"h": 3600, "m": 60, "s": 1}[m.group(2).lower()[0]]
+
+
 class UnipileClient:
     """Client Unipile API v2 — hosted LinkedIn (et autres IM)."""
 
@@ -189,11 +216,16 @@ class UnipileClient:
         if resp.status_code >= 400:
             try:
                 body = resp.json()
-                msg = body.get("detail") or body.get("message") or resp.text
-            except ValueError:
+                msg = (body.get("detail") or body.get("message")
+                       or body.get("title") or resp.text)
+            except (ValueError, AttributeError):
                 msg = resp.text or f"{resp.status_code} {resp.reason}"
-            raise UnipileError(self._sanitize(f"Unipile {resp.status_code}: {msg}"),
-                               status_code=resp.status_code)
+            full = self._sanitize(f"Unipile {resp.status_code}: {msg}")
+            # 429 = quota amont (LinkedIn cappe fiches société/profil ~100/12h par
+            # compte) → type dédié + délai parsé, l'appelant STOPPE (cf. UnipileRateLimited).
+            if resp.status_code == 429:
+                raise UnipileRateLimited(full, retry_after=_parse_retry_after(msg))
+            raise UnipileError(full, status_code=resp.status_code)
         if not resp.text:
             return None
         return resp.json()
@@ -389,7 +421,7 @@ class UnipileClient:
             cat = "companies" if category == "companies" else "people"
             return self._norm(self._request(
                 "POST", self._acct(f"{prefix}/{cat}"),
-                params={"cursor": cursor}, json={}))
+                params={"cursor": cursor}, json={}, timeout=_SCRAPE_TIMEOUT))
         params: dict[str, Any] = {}
 
         # Recherche par URL collée : endpoint from-url du produit, corps {url}.
@@ -454,7 +486,8 @@ class UnipileClient:
             if sk is not None:
                 body["skills"] = sk
         return self._norm(self._request(
-            "POST", self._acct(path), params=params, json=body
+            "POST", self._acct(path), params=params, json=body,
+            timeout=_SCRAPE_TIMEOUT,
         ))
 
     def _facet_field(self, facet_type: str, value, api: str,
@@ -550,7 +583,8 @@ class UnipileClient:
         """GET société brut + garde anti-mismatch #153. Lève telle quelle
         (404 inclus) — le fallback de résolution vit dans `get_company`."""
         data = self._request(
-            "GET", self._acct(f"/linkedin/company/{quote(identifier, safe='')}")
+            "GET", self._acct(f"/linkedin/company/{quote(identifier, safe='')}"),
+            timeout=_SCRAPE_TIMEOUT,
         )
         if not self._identity_ok(identifier, data, "CompanyProfile"):
             got = (data or {}).get("public_identifier") or (data or {}).get("id")

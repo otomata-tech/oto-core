@@ -13,7 +13,7 @@ from oto.tools.unipile.client import UnipileError
 def _client(rec):
     c = UnipileClient(api_key="k", account_id="acc")
 
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         rec.append({"path": path, "json": json})
         return {"link": "https://auth.unipile.com/?token=x"}
 

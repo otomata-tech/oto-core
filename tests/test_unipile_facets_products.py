@@ -14,7 +14,7 @@ from oto.tools.unipile.client import UnipileError
 def _client(rec=None):
     c = UnipileClient(api_key="k", account_id="acc")
 
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         if rec is not None:
             rec.append({"method": method, "path": path, "json": json})
         return {"data": []}
@@ -104,7 +104,7 @@ def test_hosted_auth_reconnect_type_and_account():
     rec = []
     c = UnipileClient(api_key="k", account_id="acc")
 
-    def fake(method, path, params=None, json=None):
+    def fake(method, path, params=None, json=None, timeout=None):
         rec.append(json)
         return {"link": "https://auth.unipile.com/?t=x"}
     c._request = fake  # type: ignore[method-assign]
