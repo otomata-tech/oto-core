@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import random
 import time
@@ -14,6 +15,8 @@ from oto.config import get_sessions_dir, get_secret
 from .scrape import ProfileMixin, CompanyMixin, MessagesMixin
 from .search import SearchMixin
 from .outreach import OutreachMixin
+
+logger = logging.getLogger(__name__)
 
 
 def get_worker_cookie(
@@ -261,12 +264,12 @@ class LinkedInClient(ProfileMixin, CompanyMixin, MessagesMixin, OutreachMixin, S
 
             if reason == "random_skip":
                 jitter = random.randint(30, 90)
-                print(f"Random skip ({action_type}): waiting {jitter}s")
+                logger.info("Random skip (%s): waiting %ss", action_type, jitter)
                 await asyncio.sleep(jitter)
                 return
 
             if wait_time < 300:
-                print(f"Rate limit ({action_type}/{reason}): waiting {wait_time}s")
+                logger.info("Rate limit (%s/%s): waiting %ss", action_type, reason, wait_time)
                 await asyncio.sleep(wait_time)
             else:
                 raise RuntimeError(

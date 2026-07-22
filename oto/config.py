@@ -11,63 +11,19 @@ import json
 from pathlib import Path
 from typing import Optional, Dict, Any
 
-# Cache for parsed secrets files
-_secrets_cache: Dict[Path, Dict[str, str]] = {}
+from oto.secrets import (
+    MISSING,
+    STORE_ABSENT,
+    AmbiguousSecretError,
+    FileProvider,
+    make_provider,
+)
+
+# Re-exported for backwards compatibility: `from oto.config import AmbiguousSecretError`
+# keeps working now that the exception lives in oto.secrets.base.
+__all__ = ["get_secret", "get_json_secret", "require_secret", "AmbiguousSecretError"]
+
 _oto_config_cache: Optional[Dict[str, Any]] = None
-
-
-class AmbiguousSecretError(RuntimeError):
-    """The key exists in the vault but with different values across files.
-
-    Raised by get_secret: returning one of the values would be arbitrary
-    (the key is scoped per project/mission file, not transverse)."""
-
-
-def _parse_env_file(path: Path) -> Dict[str, str]:
-    """Parse a .env file into a dictionary."""
-    if path in _secrets_cache:
-        return _secrets_cache[path]
-
-    result = {}
-    if path.exists():
-        with open(path, "r") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#"):
-                    continue
-                if "=" in line:
-                    key, value = line.split("=", 1)
-                    value = value.strip()
-                    # Remove quotes if present
-                    if (value.startswith("'") and value.endswith("'")) or (
-                        value.startswith('"') and value.endswith('"')
-                    ):
-                        value = value[1:-1]
-                    result[key.strip()] = value
-
-    _secrets_cache[path] = result
-    return result
-
-
-def _find_project_secrets() -> Optional[Path]:
-    """Find .otomata/secrets.env in CWD or parent directories."""
-    cwd = Path.cwd()
-
-    # Check CWD and up to 4 parent levels
-    for _ in range(5):
-        secrets_file = cwd / ".otomata" / "secrets.env"
-        if secrets_file.exists():
-            return secrets_file
-        if cwd.parent == cwd:
-            break
-        cwd = cwd.parent
-
-    return None
-
-
-def _get_user_secrets() -> Path:
-    """Get user secrets file path (~/.otomata/secrets.env)."""
-    return Path.home() / ".otomata" / "secrets.env"
 
 
 def _get_oto_config() -> Dict[str, Any]:
@@ -99,7 +55,7 @@ def get_provider() -> str:
     """Return configured secret provider ('sops', 'file', or 'scaleway').
 
     `sops` is the new default — secrets decrypted on demand from a SOPS
-    YAML file (see `oto.sops_secrets`). `file` and `scaleway` are kept for
+    YAML file (see `oto.secrets.sops`). `file` and `scaleway` are kept for
     backwards compat and migration.
     """
     return _get_oto_config().get("secret_provider", "sops")
@@ -120,34 +76,13 @@ def get_search_provider() -> str:
     return _get_oto_config().get("search_provider", "serper")
 
 
-_MISSING = object()
-
-
-def _file_provider_lookup(name: str):
-    """Look `name` up in the file provider (project secrets, then user secrets).
-
-    Returns the value, or the `_MISSING` sentinel when not present (so an empty
-    string stored on purpose is distinguishable from "not found").
-    """
-    project_secrets = _find_project_secrets()
-    if project_secrets:
-        secrets = _parse_env_file(project_secrets)
-        if name in secrets:
-            return secrets[name]
-    user_secrets = _get_user_secrets()
-    secrets = _parse_env_file(user_secrets)
-    if name in secrets:
-        return secrets[name]
-    return _MISSING
-
-
 def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     """
     Get a secret value.
 
     Resolution order:
     1. Environment variable (always, highest priority)
-    2. Configured provider (sops / scaleway / file)
+    2. Configured provider (sops / scaleway / file), via `oto.secrets.make_provider`
     3. Local file provider as a graceful fallback when the configured provider
        has no backing store (e.g. fresh/third-party install with sops default
        but no SOPS repo cloned)
@@ -180,47 +115,19 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     if os.environ.get("OTO_CONFIG_DISABLE_SOPS") == "1":
         return default
 
-    # 2. Configured provider. `store_missing` marks the case where the provider
-    #    is configured but has no backing store, so we can fall back to the
-    #    local file provider instead of failing.
-    provider = get_provider()
-    store_missing = False
-    if provider == "sops":
-        from oto.sops_secrets import fetch_secrets as _sops_fetch, ambiguous_keys
-        cfg = _get_oto_config()
-        try:
-            secrets = _sops_fetch(
-                path=cfg.get("sops_file"),
-                dir_path=cfg.get("sops_dir"),
-            )
-            if name in secrets:
-                return secrets[name]
-            if name in ambiguous_keys():
-                files = ambiguous_keys()[name]
-                raise AmbiguousSecretError(
-                    f"Secret '{name}' is defined with DIFFERENT values in several "
-                    f"vault files: {', '.join(files)}. It is scoped per file, not "
-                    f"transverse — read the relevant file directly "
-                    f"(`sops -d <file>`) or pass it via the environment."
-                )
-        except FileNotFoundError:
-            store_missing = True
-    elif provider == "scaleway":
-        from oto.scaleway_secrets import fetch_secrets
-        secrets = fetch_secrets()
-        if name in secrets:
-            return secrets[name]
-    else:
-        # File provider is the primary lookup.
-        value = _file_provider_lookup(name)
-        if value is not _MISSING:
-            return value
+    # 2. Configured provider (may raise AmbiguousSecretError).
+    provider = make_provider(get_provider(), _get_oto_config())
+    value = provider.lookup(name)
+    if value is not MISSING and value is not STORE_ABSENT:
+        return value
 
-    # 3. Graceful fallback to local file secrets when the configured provider's
-    #    store is absent (sops default but no SOPS repo on a third-party box).
-    if store_missing:
-        value = _file_provider_lookup(name)
-        if value is not _MISSING:
+    # 3. Graceful fallback to local file secrets ONLY when the configured
+    #    provider's store is absent (sops default but no SOPS repo on a
+    #    third-party box). A store that is present but lacks the key is
+    #    authoritative — no fallback.
+    if value is STORE_ABSENT:
+        value = FileProvider().lookup(name)
+        if value is not MISSING:
             return value
 
     return default

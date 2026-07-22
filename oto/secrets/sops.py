@@ -9,7 +9,7 @@ Lit un ou plusieurs fichiers YAML chiffrés via SOPS + age. Configurable via
 - `sops_file` : un seul fichier (legacy / mono-fichier). Si défini, prioritaire
   sur `sops_dir` et seul ce fichier est lu.
 
-Layout multi-fichiers (cf. AlexisLaporte/secrets) :
+Layout multi-fichiers typique :
     secrets/
     ├── secrets.yaml         # transverse Otomata
     ├── tuls.yaml            # host
@@ -22,14 +22,16 @@ caché module-level (une seule décryption par process).
 
 Collisions de clés : même valeur ⇒ merge silencieux ; valeurs différentes
 (clé générique scopée par fichier, ex. DATABASE_URL par projet) ⇒ la clé est
-EXCLUE du namespace flat et listée dans `ambiguous_keys()` — `get_secret`
-lève une erreur explicite si on la demande.
+EXCLUE du namespace flat et listée dans `ambiguous_keys()` — `SopsProvider.lookup`
+lève `AmbiguousSecretError` si on la demande.
 """
 from __future__ import annotations
 
 import subprocess
 from pathlib import Path
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
+
+from .base import MISSING, STORE_ABSENT, AmbiguousSecretError
 
 _cache: Optional[Dict[str, str]] = None
 # Clés définies avec des VALEURS DIFFÉRENTES dans plusieurs fichiers (clés
@@ -89,7 +91,7 @@ def _merge(
             continue
         if k in target and target[k] != v:
             # Valeurs divergentes ⇒ clé scopée par fichier, pas transverse.
-            # On la retire du flat ; get_secret lèvera si on la demande.
+            # On la retire du flat ; lookup lèvera si on la demande.
             _ambiguous[k] = [origins.pop(k), str(source_path)]
             del target[k]
             continue
@@ -129,7 +131,8 @@ def fetch_secrets(
         if root is None or not root.is_dir():
             raise FileNotFoundError(
                 f"SOPS secrets dir not found. Tried: {[str(c) for c in _candidate_default_dirs()]}. "
-                f"Clone: git clone git@github.com:AlexisLaporte/secrets ~/.otomata/secrets"
+                f"Place your SOPS-encrypted *.yaml secrets under ~/.otomata/secrets/ "
+                f"(or set 'sops_dir' in ~/.otomata/config.yaml)."
             )
         yaml_files = sorted(p for p in root.rglob("*.yaml") if p.name != ".sops.yaml")
         if not yaml_files:
@@ -147,3 +150,29 @@ def invalidate_cache() -> None:
     global _cache
     _cache = None
     _ambiguous.clear()
+
+
+class SopsProvider:
+    """Resolve secrets from a SOPS-encrypted store."""
+
+    def __init__(self, cfg: Optional[Dict[str, Any]] = None) -> None:
+        cfg = cfg or {}
+        self._file = cfg.get("sops_file")
+        self._dir = cfg.get("sops_dir")
+
+    def lookup(self, name: str) -> object:
+        try:
+            secrets = fetch_secrets(path=self._file, dir_path=self._dir)
+        except FileNotFoundError:
+            return STORE_ABSENT
+        if name in secrets:
+            return secrets[name]
+        amb = ambiguous_keys()
+        if name in amb:
+            raise AmbiguousSecretError(
+                f"Secret '{name}' is defined with DIFFERENT values in several "
+                f"vault files: {', '.join(amb[name])}. It is scoped per file, not "
+                f"transverse — read the relevant file directly "
+                f"(`sops -d <file>`) or pass it via the environment."
+            )
+        return MISSING

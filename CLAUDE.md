@@ -4,7 +4,7 @@
 
 Namespace package `oto` (PEP 420, **pas d'`oto/__init__.py`**) :
 - `oto.tools.*` — les clients (serper, attio, hunter, google, linkedin via o-browser, pennylane, reddit, slack, whatsapp, gocardless, sirene/inpi/bodacc/boamp/dvf/culture via france-opendata…).
-- `oto.config` — résolution de secrets 3-tier (env → SOPS/file/scaleway → défaut) ; `oto.sops_secrets`, `oto.scaleway_secrets`.
+- `oto.config` — résolution de secrets 3-tier (env → SOPS/file/scaleway → défaut). `config.get_secret` orchestre ; les providers vivent dans le package `oto.secrets` (`sops`/`scaleway`/`file`), sélectionnés par la factory `oto.secrets.make_provider`.
 
 ## Place dans l'écosystème
 
@@ -25,10 +25,17 @@ Donc : un connecteur = un client ici, plusieurs faces (CLI, MCP). [[meta otomata
 ```
 oto/                      # namespace (PAS d'__init__.py)
 ├── tools/                # 1 dossier/connecteur : <svc>/client.py (+ lib/ pour google)
-├── config.py             # get_secret/require_secret (env → provider → défaut)
-├── sops_secrets.py       # provider SOPS+age
-└── scaleway_secrets.py   # provider Secret Manager
+├── config.py             # get_secret/require_secret (orchestrateur : env → provider → fallback fichier → défaut)
+└── secrets/              # providers de secrets + factory
+    ├── __init__.py       # make_provider(name, cfg) — factory + registre
+    ├── base.py           # protocole SecretProvider + sentinelles (MISSING/STORE_ABSENT) + AmbiguousSecretError
+    ├── sops.py           # provider SOPS+age (SopsProvider)
+    ├── scaleway.py       # provider Secret Manager (ScalewayProvider)
+    └── file.py           # provider fichier .otomata/secrets.env (FileProvider)
 ```
+
+Ajouter un provider = un module exposant `lookup(name)` + une ligne au registre
+`oto/secrets/__init__.py` — zéro branche `if provider ==` dans `oto.config`.
 
 ## Conventions
 

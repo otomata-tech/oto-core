@@ -3,6 +3,7 @@ Notion API client with caching support.
 """
 import json
 import hashlib
+import logging
 import os
 import time
 from pathlib import Path
@@ -10,6 +11,8 @@ from typing import Optional, Dict, Any
 import requests
 
 from ....config import get_cache_dir
+
+logger = logging.getLogger(__name__)
 
 
 class NotionClient:
@@ -86,7 +89,7 @@ class NotionClient:
             with open(cache_file, 'w', encoding='utf-8') as f:
                 json.dump(data, f, indent=2, ensure_ascii=False)
         except Exception as e:
-            print(f"Warning: Failed to cache response: {e}")
+            logger.warning("Failed to cache response: %s", e)
 
     def _request(self, method: str, endpoint: str, params: Dict = None,
                  data: Dict = None, use_cache: bool = True) -> Dict:
@@ -97,7 +100,8 @@ class NotionClient:
             cache_key = self._get_cache_key(method, endpoint, params, data)
             cached = self._get_cached(cache_key)
             if cached:
-                print(f"✓ Using cached response (age: {int(time.time() - (self.cache_dir / f'{cache_key}.json').stat().st_mtime)}s)")
+                age = int(time.time() - (self.cache_dir / f'{cache_key}.json').stat().st_mtime)
+                logger.debug("Using cached response (age: %ss)", age)
                 return cached
 
         # Make API request

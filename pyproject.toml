@@ -25,7 +25,11 @@ vivatech = ["o-browser-vivatech"]
 anthropic = ["anthropic>=0.40.0"]
 stock = ["pyarrow>=10.0.0", "pandas>=1.5.0"]
 anonymize = ["faker>=20.0.0"]
-all = ["oto-core[google,browser,vivatech,anthropic,stock,anonymize]"]
+# `cli` = the Typer command surfaces under oto.tools.*.commands, mounted by the
+# oto-cli façade. They import typer, which core clients never do — declare it so
+# `import oto.tools.google.gmail.commands` doesn't fail on a plain install.
+cli = ["typer>=0.9.0"]
+all = ["oto-core[google,browser,vivatech,anthropic,stock,anonymize,cli]"]
 
 [tool.setuptools.packages.find]
 where = ["."]

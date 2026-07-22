@@ -4,6 +4,7 @@ Supports multiple services, action types, hourly/daily limits, and active hours 
 """
 
 import json
+import logging
 import random
 import time
 import fcntl
@@ -11,6 +12,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from typing import Optional, Tuple
 from zoneinfo import ZoneInfo
+
+logger = logging.getLogger(__name__)
 
 
 class RateLimiter:
@@ -289,12 +292,12 @@ class RateLimiter:
 
         if not can_proceed:
             if reason == 'outside_active_hours':
-                print(f"🌙 [{self.service}] Outside active hours. Resume at {self.next_active_time()}")
+                logger.info("[%s] Outside active hours. Resume at %s", self.service, self.next_active_time())
                 return None
 
             if reason == 'random_skip':
                 jitter = random.randint(30, 90)
-                print(f"🎲 [{self.service}] Random skip: waiting {jitter}s")
+                logger.info("[%s] Random skip: waiting %ss", self.service, jitter)
                 time.sleep(jitter)
                 return jitter
 
@@ -303,11 +306,11 @@ class RateLimiter:
                     jitter = random.randint(0, 10)
                     wait_time += jitter
 
-                print(f"⏳ [{self.service}] Rate limit ({reason}): waiting {wait_time}s")
+                logger.info("[%s] Rate limit (%s): waiting %ss", self.service, reason, wait_time)
                 time.sleep(wait_time)
                 return wait_time
             else:
-                print(f"❌ [{self.service}] Rate limit ({reason}). Wait {wait_time}s until {self.can_make_request_at()}")
+                logger.warning("[%s] Rate limit (%s). Wait %ss until %s", self.service, reason, wait_time, self.can_make_request_at())
                 return None
 
         # Even when allowed, add small random delay for humanization
@@ -379,9 +382,9 @@ class RateLimiter:
         try:
             del data[self.service][self.identity][self.action_type][today]
             self._save_data(data)
-            print(f"✅ Rate limiter reset for {self.service}/{self.identity}/{self.action_type}")
+            logger.info("Rate limiter reset for %s/%s/%s", self.service, self.identity, self.action_type)
         except KeyError:
-            print(f"ℹ️  No data to reset for {self.service}/{self.identity}/{self.action_type}")
+            logger.info("No data to reset for %s/%s/%s", self.service, self.identity, self.action_type)
 
 
 # Preset configurations for common services

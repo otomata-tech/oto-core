@@ -1,8 +1,9 @@
-"""Scaleway Secret Manager client for oto secrets.
+"""Scaleway Secret Manager provider for oto secrets.
 
 Stores all secrets as a single JSON payload in one Scaleway secret ('otomata-secrets').
 Auth via ~/.config/scw/config.yaml (same as scw CLI).
 """
+from __future__ import annotations
 
 import base64
 import json
@@ -10,6 +11,8 @@ from pathlib import Path
 from typing import Dict, Optional
 
 import requests
+
+from .base import MISSING
 
 _SCW_CONFIG = Path.home() / ".config" / "scw" / "config.yaml"
 _BASE_URL = "https://api.scaleway.com/secret-manager/v1beta1/regions/{region}/secrets"
@@ -27,8 +30,6 @@ def _load_scw_credentials() -> dict:
             "Run 'scw init' to configure."
         )
 
-    # Parse YAML manually (top-level key: value lines) to avoid pyyaml dependency here
-    # Full YAML parsing is in config.py where pyyaml is available
     import yaml
 
     with open(_SCW_CONFIG) as f:
@@ -129,3 +130,13 @@ def push_secrets(secrets: Dict[str, str]) -> str:
     _cache = None
 
     return resp.json()["revision"]
+
+
+class ScalewayProvider:
+    """Resolve secrets from Scaleway Secret Manager."""
+
+    def lookup(self, name: str) -> object:
+        secrets = fetch_secrets()
+        if name in secrets:
+            return secrets[name]
+        return MISSING
