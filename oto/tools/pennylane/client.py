@@ -474,6 +474,12 @@ class PennylaneClient:
         """One product by id."""
         return self.fetch(f"products/{product_id}")
 
+    def list_invoice_templates(self, max_pages: Optional[int] = None) -> list:
+        """List customer invoice templates (models — scope
+        customer_invoice_templates:readonly). The template drives the PDF
+        rendering (e.g. an « Avoir » model without the payment/IBAN block)."""
+        return self.fetch_all_pages("customer_invoice_templates", max_pages=max_pages)
+
     def create_product(self, label: str, unit_price: str, unit: str = "day",
                        vat_rate: str = "FR_200", description: str = None) -> dict:
         """Create a product. unit_price as string (e.g. '700.00')."""
@@ -493,6 +499,7 @@ class PennylaneClient:
                                 lines: list[dict], draft: bool = True,
                                 external_reference: str = None,
                                 pdf_free_text: str = None,
+                                customer_invoice_template_id: int = None,
                                 currency: str = "EUR") -> dict:
         """
         Create a customer invoice.
@@ -514,11 +521,14 @@ class PennylaneClient:
             body["external_reference"] = external_reference
         if pdf_free_text:
             body["pdf_invoice_free_text"] = pdf_free_text
+        if customer_invoice_template_id:
+            body["customer_invoice_template_id"] = customer_invoice_template_id
         return self.post("customer_invoices", body)
 
     def create_credit_note(self, customer_id: int, date: str, deadline: str,
                            lines: list[dict], external_reference: str = None,
                            pdf_free_text: str = None,
+                           customer_invoice_template_id: int = None,
                            draft: bool = True, currency: str = "EUR") -> dict:
         """Create a STANDALONE credit note (avoir) — an invoice with negative amounts.
 
@@ -564,6 +574,8 @@ class PennylaneClient:
             body["external_reference"] = external_reference
         if pdf_free_text:
             body["pdf_invoice_free_text"] = pdf_free_text
+        if customer_invoice_template_id:
+            body["customer_invoice_template_id"] = customer_invoice_template_id
         return self.post("customer_invoices", body)
 
     def link_credit_note(self, invoice_id: int, credit_note_id: int) -> dict:
