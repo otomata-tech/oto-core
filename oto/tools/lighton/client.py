@@ -185,9 +185,11 @@ class LightOnClient:
         Args:
             data: contenu binaire du fichier.
             filename: nom de fichier (l'extension détermine le parsing).
-            collection_type: `private` (défaut Paradigm), `company` ou
-                `workspace`.
-            workspace_id: requis si `collection_type='workspace'`.
+            collection_type: `private`, `company` ou `shared` (workspace).
+                ⚠️ Empirique 2026-07 : la valeur `workspace` de la doc
+                OpenAPI officielle est REJETÉE (« no longer valid ») — un
+                upload vers un workspace = `shared` + `workspace_id`.
+            workspace_id: requis si `collection_type='shared'`.
             title: titre affiché (défaut = filename).
         """
         form: Dict[str, Any] = {}

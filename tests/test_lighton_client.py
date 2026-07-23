@@ -113,13 +113,14 @@ def test_list_files_scopes(calls, c):
 
 
 def test_upload_multipart_shape(calls, c):
-    c.upload_file_bytes(b"abc", "note.txt", collection_type="private",
-                        title="Note")
+    c.upload_file_bytes(b"abc", "note.txt", collection_type="shared",
+                        workspace_id=7046, title="Note")
     call = calls[0]
     assert call["method"] == "POST"
     assert call["url"] == f"{BASE}/files"
     assert call["files"] == {"file": ("note.txt", b"abc")}
-    assert call["data"] == {"collection_type": "private", "title": "Note"}
+    assert call["data"] == {"collection_type": "shared",
+                            "workspace_id": "7046", "title": "Note"}
     # le multipart ne doit PAS forcer un Content-Type json
     assert "Content-Type" not in call["headers"]
 
