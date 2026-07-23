@@ -492,12 +492,15 @@ class PennylaneClient:
     def create_customer_invoice(self, customer_id: int, date: str, deadline: str,
                                 lines: list[dict], draft: bool = True,
                                 external_reference: str = None,
+                                pdf_free_text: str = None,
                                 currency: str = "EUR") -> dict:
         """
         Create a customer invoice.
 
         lines: list of dicts with keys: product_id, quantity, and optionally
                label, raw_currency_unit_price, unit, vat_rate.
+        pdf_free_text: free text printed on the PDF (customer-visible comment,
+               API field `pdf_invoice_free_text`).
         """
         body = {
             "customer_id": customer_id,
@@ -509,10 +512,13 @@ class PennylaneClient:
         }
         if external_reference:
             body["external_reference"] = external_reference
+        if pdf_free_text:
+            body["pdf_invoice_free_text"] = pdf_free_text
         return self.post("customer_invoices", body)
 
     def create_credit_note(self, customer_id: int, date: str, deadline: str,
                            lines: list[dict], external_reference: str = None,
+                           pdf_free_text: str = None,
                            draft: bool = True, currency: str = "EUR") -> dict:
         """Create a STANDALONE credit note (avoir) — an invoice with negative amounts.
 
@@ -556,6 +562,8 @@ class PennylaneClient:
         }
         if external_reference:
             body["external_reference"] = external_reference
+        if pdf_free_text:
+            body["pdf_invoice_free_text"] = pdf_free_text
         return self.post("customer_invoices", body)
 
     def link_credit_note(self, invoice_id: int, credit_note_id: int) -> dict:
