@@ -470,6 +470,10 @@ class PennylaneClient:
         """List all products."""
         return self.fetch_all_pages("products", max_pages=max_pages)
 
+    def get_product(self, product_id: int) -> dict:
+        """One product by id."""
+        return self.fetch(f"products/{product_id}")
+
     def create_product(self, label: str, unit_price: str, unit: str = "day",
                        vat_rate: str = "FR_200", description: str = None) -> dict:
         """Create a product. unit_price as string (e.g. '700.00')."""
@@ -507,37 +511,60 @@ class PennylaneClient:
             body["external_reference"] = external_reference
         return self.post("customer_invoices", body)
 
-    def create_credit_note(self, customer_id: int, date: str, lines: list[dict],
-                           credited_invoice_id: int, external_reference: str = None,
+    def create_credit_note(self, customer_id: int, date: str, deadline: str,
+                           lines: list[dict], external_reference: str = None,
                            draft: bool = True, currency: str = "EUR") -> dict:
-        """Create a credit note (avoir) crediting an existing customer invoice.
+        """Create a STANDALONE credit note (avoir) — an invoice with negative amounts.
 
-        A credit note is a `customer_invoice` linked to the original via
-        `credited_invoice` (the field is null on a normal invoice, points to the
-        credited invoice on an avoir — confirmed on API v2). `external_reference`
-        traces the source event (e.g. a GoCardless payment id `PMxxxx`) and lets a
-        caller stay idempotent (one failed payment → one avoir). Draft by default —
-        finalize separately once a human has validated.
+        Official v2 convention (changelog « V2 - List Credit Notes and Customer
+        Invoices ») : there is no dedicated credit-note endpoint — an avoir IS a
+        `customer_invoice` whose amounts are NEGATIVE. The caller provides
+        POSITIVE business lines (e.g. 195 credits at 1.45) ; this method flips
+        each line's quantity sign so the « avoir » nature is structural, never
+        left to the caller.
+
+        NO linking at creation : the create-endpoint attribute
+        `credited_invoice_id` is broken upstream (« not working as expected …
+        will be removed » — Pennylane changelog). Link afterwards with
+        `link_credit_note()` if ever needed ; the MM practice links nothing
+        (the AUT-… reference lives in free text on the invoice label).
+
+        `external_reference` traces the source event (e.g. a GoCardless payment
+        id `PMxxxx`) and keeps the caller idempotent (one failed payment → one
+        avoir). Draft by default — finalize separately after human validation.
 
         lines: same shape as create_customer_invoice (product_id, quantity, and
                optionally label, raw_currency_unit_price, unit, vat_rate).
-
-        # À CONFIRMER (compte sandbox) : nom/forme exacts du champ de liaison
-        (`credited_invoice` vs `credited_invoice_id`) et endpoint (POST sur
-        customer_invoices avec le flag, vs endpoint dédié). Implémenté ici comme le
-        flag documenté ; à ajuster au 1er test sandbox MM.
         """
+        neg_lines = []
+        for line in lines:
+            li = dict(line)
+            qty = li.get("quantity")
+            if isinstance(qty, bool) or not isinstance(qty, (int, float)) or qty == 0:
+                raise ValueError(
+                    "credit-note line needs a non-zero numeric `quantity` "
+                    f"(got {qty!r})")
+            li["quantity"] = -abs(qty)
+            neg_lines.append(li)
         body = {
             "customer_id": customer_id,
             "date": date,
+            "deadline": deadline,
             "draft": draft,
             "currency": currency,
-            "credited_invoice_id": credited_invoice_id,
-            "invoice_lines": lines,
+            "invoice_lines": neg_lines,
         }
         if external_reference:
             body["external_reference"] = external_reference
         return self.post("customer_invoices", body)
+
+    def link_credit_note(self, invoice_id: int, credit_note_id: int) -> dict:
+        """Link an existing credit note to the customer invoice it credits.
+
+        Dedicated v2 endpoint — the only working way to link (the create-time
+        `credited_invoice_id` attribute is broken upstream)."""
+        return self.post(f"customer_invoices/{invoice_id}/link_credit_note",
+                         {"credit_note_id": credit_note_id})
 
     def find_invoice_by_external_reference(self, external_reference: str,
                                            max_pages: int = 5) -> Optional[dict]:
