@@ -1,7 +1,8 @@
-"""LightOnClient — verrouille le contrat HTTP (verbe, URL, body, multipart)
-de chaque endpoint Paradigm v2 couvert, la surfaçage d'erreur ({detail}/{error}
-du body Paradigm remonté dans le RuntimeError) et le défaut/override de
-`base_url` (instance SaaS publique vs instance privée).
+"""LightOnClient (API v3, api.lighton.ai) — verrouille le contrat HTTP
+(verbe, URL, body, multipart) des endpoints couverts : search/ask (retrieval),
+parse/extract (traitement one-shot), files (upload workspace-requis, filtres),
+workspaces ; le surfaçage d'erreur ({detail}/{error} LightOn remonté dans le
+RuntimeError) et le défaut/override de `base_url` (SaaS vs instance privée).
 
 Mocke `requests.request` : contrat HTTP uniquement, sans réseau ni clé réelle.
 """
@@ -12,7 +13,7 @@ import pytest
 from oto.tools.lighton import client as lighton_client
 from oto.tools.lighton.client import LightOnClient
 
-BASE = "https://paradigm.lighton.ai/api/v2"
+BASE = "https://api.lighton.ai/api/v3"
 
 
 class _Resp:
@@ -39,7 +40,7 @@ def calls(monkeypatch):
             "method": method, "url": url, "headers": headers, "json": json,
             "params": params, "files": files, "data": data, "timeout": timeout,
         })
-        return _Resp({"object": "list", "data": []})
+        return _Resp({"results": []})
 
     monkeypatch.setattr(lighton_client.requests, "request", fake_request)
     return captured
@@ -53,84 +54,117 @@ def c():
 # --- auth / base_url ----------------------------------------------------------
 
 def test_bearer_header(calls, c):
-    c.list_models()
+    c.list_workspaces()
     assert calls[0]["headers"]["Authorization"] == "Bearer test-key"
 
 
-def test_default_base_url(calls, c):
-    c.list_models()
-    assert calls[0]["url"] == f"{BASE}/models"
+def test_default_base_url_is_v3(calls, c):
+    c.list_workspaces()
+    assert calls[0]["url"] == f"{BASE}/workspaces"
 
 
 def test_private_instance_base_url(calls):
-    c = LightOnClient(api_key="test-key",
-                      base_url="https://paradigm.acme.fr/api/v2/")
-    c.list_models()
-    # trailing slash normalisé
-    assert calls[0]["url"] == "https://paradigm.acme.fr/api/v2/models"
+    c = LightOnClient(api_key="test-key", base_url="https://lighton.acme.fr/")
+    c.list_workspaces()
+    # trailing slash normalisé, /api/v3 ajouté par le client
+    assert calls[0]["url"] == "https://lighton.acme.fr/api/v3/workspaces"
 
 
-# --- chat ---------------------------------------------------------------------
+# --- retrieval ----------------------------------------------------------------
 
-def test_chat_body_shape(calls, c):
-    msgs = [{"role": "user", "content": "salut"}]
-    c.chat(msgs, "alfred-ft5", max_tokens=10, temperature=0.2)
+def test_search_body_shape(calls, c):
+    c.search("code secret", workspace_ids=[7046], max_results=3)
     call = calls[0]
     assert call["method"] == "POST"
-    assert call["url"] == f"{BASE}/chat/completions"
-    assert call["json"] == {"model": "alfred-ft5", "messages": msgs,
-                            "max_tokens": 10, "temperature": 0.2}
+    assert call["url"] == f"{BASE}/search"
+    assert call["json"] == {"query": "code secret", "workspace_id": [7046],
+                            "max_results": 3}
 
 
-def test_chat_omits_unset_sampling_params(calls, c):
-    c.chat([{"role": "user", "content": "x"}], "alfred-ft5")
-    assert set(calls[0]["json"]) == {"model", "messages"}
+def test_search_omits_unset_options(calls, c):
+    c.search("x")
+    assert calls[0]["json"] == {"query": "x"}
 
 
-# --- base documentaire --------------------------------------------------------
+def test_search_vision_mode_and_flags(calls, c):
+    c.search("plan", mode="vision", include_image=True, include_bboxes=True)
+    body = calls[0]["json"]
+    assert body["mode"] == "vision"
+    assert body["include_image"] is True
+    assert body["include_bboxes"] is True
 
-def test_query_body_shape(calls, c):
-    c.query("code secret", collection="base_collection", n=3)
+
+def test_ask_body_shape(calls, c):
+    c.ask("quel code ?", workspace_ids=[7046], model="mistral-large-latest")
     call = calls[0]
-    assert call["method"] == "POST"
-    assert call["url"] == f"{BASE}/query"
-    assert call["json"] == {"query": "code secret", "n": 3,
-                            "collection": "base_collection"}
+    assert call["url"] == f"{BASE}/ask"
+    assert call["json"] == {"query": "quel code ?", "stream": False,
+                            "workspace_id": [7046],
+                            "model": "mistral-large-latest"}
 
 
-def test_query_default_collection_omitted(calls, c):
-    c.query("x")
-    assert "collection" not in calls[0]["json"]
+# --- parse / extract ----------------------------------------------------------
 
-
-def test_list_files_scopes(calls, c):
-    c.list_files(private_scope=True, company_scope=False, page=2)
+def test_parse_bytes_multipart(calls, c):
+    c.parse_bytes(b"abc", "doc.pdf")
     call = calls[0]
-    assert call["method"] == "GET"
-    assert call["url"] == f"{BASE}/files"
-    assert call["params"] == {"private_scope": True, "company_scope": False,
-                              "page": 2}
+    assert call["url"] == f"{BASE}/parse"
+    assert call["files"] == {"file": ("doc.pdf", b"abc")}
+    assert call["data"] is None  # sync : pas d'options
 
 
-def test_upload_multipart_shape(calls, c):
-    c.upload_file_bytes(b"abc", "note.txt", collection_type="shared",
-                        workspace_id=7046, title="Note")
+def test_parse_bytes_async_option(calls, c):
+    c.parse_bytes(b"abc", "doc.pdf", async_=True)
+    assert calls[0]["data"] == {"options": '{"async": true}'}
+
+
+def test_parse_url_json(calls, c):
+    c.parse_url("https://example.com/r.pdf")
+    assert calls[0]["json"] == {"document": "https://example.com/r.pdf"}
+
+
+def test_parse_job_path(calls, c):
+    c.parse_job("parse_abc")
+    assert calls[0]["method"] == "GET"
+    assert calls[0]["url"] == f"{BASE}/parse/parse_abc"
+
+
+def test_extract_bytes_schema_json_encoded(calls, c):
+    schema = {"type": "object", "properties": {"n": {"type": "string"}}}
+    c.extract_bytes(b"abc", "f.pdf", schema)
+    call = calls[0]
+    assert call["url"] == f"{BASE}/extract"
+    assert call["files"] == {"file": ("f.pdf", b"abc")}
+    assert json.loads(call["data"]["schema"]) == schema
+
+
+def test_extract_url_json(calls, c):
+    schema = {"type": "object"}
+    c.extract_url("https://example.com/f.pdf", schema)
+    assert calls[0]["json"] == {"document": "https://example.com/f.pdf",
+                                "schema": schema}
+
+
+# --- files --------------------------------------------------------------------
+
+def test_upload_requires_workspace_in_form(calls, c):
+    c.upload_file_bytes(b"abc", "note.txt", 7046, title="Note")
     call = calls[0]
     assert call["method"] == "POST"
     assert call["url"] == f"{BASE}/files"
     assert call["files"] == {"file": ("note.txt", b"abc")}
-    assert call["data"] == {"collection_type": "shared",
-                            "workspace_id": "7046", "title": "Note"}
+    assert call["data"] == {"workspace_id": "7046", "title": "Note"}
     # le multipart ne doit PAS forcer un Content-Type json
     assert "Content-Type" not in call["headers"]
 
 
-def test_ask_document_path_and_body(calls, c):
-    c.ask_document(42, "quel est le code ?")
+def test_list_files_filters(calls, c):
+    c.list_files(workspace_ids=[7046, 8], search="contrat", status="embedded")
     call = calls[0]
-    assert call["method"] == "POST"
-    assert call["url"] == f"{BASE}/files/42/ask-question"
-    assert call["json"] == {"question": "quel est le code ?"}
+    assert call["method"] == "GET"
+    assert call["url"] == f"{BASE}/files"
+    assert call["params"] == {"workspace_id": "7046,8", "search": "contrat",
+                              "status": "embedded"}
 
 
 def test_delete_file_path(calls, c):
@@ -142,13 +176,13 @@ def test_delete_file_path(calls, c):
 
 # --- erreurs ------------------------------------------------------------------
 
-def test_error_surfaces_paradigm_detail(monkeypatch, c):
+def test_error_surfaces_lighton_detail(monkeypatch, c):
     monkeypatch.setattr(
         lighton_client.requests, "request",
         lambda *a, **k: _Resp({"code": 404, "error": "not_found",
                                "detail": "No API endpoint at /x."}, 404))
     with pytest.raises(RuntimeError) as exc:
-        c.list_models()
+        c.list_workspaces()
     assert "404" in str(exc.value)
     assert "No API endpoint" in str(exc.value)
 
@@ -158,6 +192,16 @@ def test_error_falls_back_to_error_field(monkeypatch, c):
         lighton_client.requests, "request",
         lambda *a, **k: _Resp({"error": "Permission denied", "code": 403}, 403))
     with pytest.raises(RuntimeError) as exc:
-        c.list_models()
+        c.list_workspaces()
     assert "403" in str(exc.value)
     assert "Permission denied" in str(exc.value)
+
+
+def test_validation_error_dict_surfaced(monkeypatch, c):
+    # DRF renvoie parfois {"champ": ["message"]} sans detail/error.
+    monkeypatch.setattr(
+        lighton_client.requests, "request",
+        lambda *a, **k: _Resp({"workspace_id": ["This field is required."]}, 400))
+    with pytest.raises(RuntimeError) as exc:
+        c.list_workspaces()
+    assert "workspace_id" in str(exc.value)
