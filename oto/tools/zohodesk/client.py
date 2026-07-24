@@ -5,6 +5,7 @@ OAuth scopes required (combine with comma at token-generation time):
   Desk.contacts.READ
   Desk.basic.READ
   Desk.settings.READ
+  Desk.articles.READ          (Help Center / KB articles)
 
 Secrets expected in environment / ~/.otomata/secrets.env:
   ZOHO_DESK_CLIENT_ID
@@ -195,3 +196,43 @@ class ZohoDeskClient:
 
     def list_agents(self) -> dict:
         return self._request("GET", "agents")
+
+    # --- Articles (Help Center / Knowledge Base) ---
+
+    def list_articles(
+        self,
+        from_index: int = 1,
+        limit: int = 50,
+        department_id: Optional[str] = None,
+        category_id: Optional[str] = None,
+        status: Optional[str] = None,
+        sort_by: Optional[str] = None,
+    ) -> dict:
+        """List Help Center articles (metadata only — the HTML body comes from
+        `get_article`). status: Published / Draft / Review / Expired.
+        sortBy: e.g. modifiedTime, createdTime, viewCount (prefix "-" for desc)."""
+        params: dict[str, Any] = {"from": from_index, "limit": min(limit, 100)}
+        if department_id:
+            params["departmentId"] = department_id
+        if category_id:
+            params["categoryId"] = category_id
+        if status:
+            params["status"] = status
+        if sort_by:
+            params["sortBy"] = sort_by
+        return self._request("GET", "articles", params=params)
+
+    def get_article(self, article_id: str) -> dict:
+        """Get a single article, including its full HTML body (`answer`)."""
+        return self._request("GET", f"articles/{article_id}")
+
+    def search_articles(
+        self, search_str: str, from_index: int = 1, limit: int = 50,
+        department_id: Optional[str] = None,
+    ) -> dict:
+        """Full-text search over Help Center articles (`/articles/search`)."""
+        params: dict[str, Any] = {
+            "searchStr": search_str, "from": from_index, "limit": min(limit, 100)}
+        if department_id:
+            params["departmentId"] = department_id
+        return self._request("GET", "articles/search", params=params)
