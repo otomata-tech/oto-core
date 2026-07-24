@@ -420,8 +420,25 @@ class PennylaneClient:
     # --- Customers ---
 
     def list_customers(self, max_pages: Optional[int] = None) -> list:
-        """List all customers."""
-        return self.fetch_all_pages("company_customers", max_pages=max_pages)
+        """List all customers.
+
+        v2 quirk: the LIST endpoint is `customers` (GET), while create/update use
+        `company_customers` (POST/PUT). `company_customers` has no GET → 404."""
+        return self.fetch_all_pages("customers", max_pages=max_pages)
+
+    def find_customer_by_external_reference(self, external_reference: str):
+        """Return the customer carrying this `external_reference`, or None.
+
+        Anti-duplicate guard for customer creation: a company that already had an
+        avoir exists (external_reference = the back-office companyId), and creating
+        it again fails 422 « External reference has already been taken ». Uses the
+        NATIVE server-side filter on `customers` (single call, no scan)."""
+        import json as _json
+        flt = _json.dumps([{"field": "external_reference", "operator": "eq",
+                            "value": str(external_reference)}])
+        data = self.fetch("customers", {"filter": flt})
+        items = data.get("items", []) if isinstance(data, dict) else []
+        return items[0] if items else None
 
     def create_customer(self, name: str, emails: list[str] = None,
                         address: str = None, postal_code: str = None,
