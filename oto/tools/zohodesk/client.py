@@ -46,7 +46,11 @@ class ZohoDeskClient:
         self.client_id = client_id or require_secret("ZOHO_DESK_CLIENT_ID")
         self.client_secret = client_secret or require_secret("ZOHO_DESK_CLIENT_SECRET")
         self.refresh_token = refresh_token or require_secret("ZOHO_DESK_REFRESH_TOKEN")
-        self.org_id = org_id or require_secret("ZOHO_DESK_ORG_ID")
+        # org_id (en-tête `orgId`) est OPTIONNEL : les endpoints KB articles
+        # résolvent le portail depuis le token mono-org (vérifié empiriquement) →
+        # pas de require_secret qui forcerait le champ. Fourni si un endpoint le
+        # réclame (tickets…), omis de l'en-tête sinon.
+        self.org_id = org_id or get_secret("ZOHO_DESK_ORG_ID", None)
         self.api_domain = api_domain or get_secret(
             "ZOHO_DESK_API_DOMAIN", "https://desk.zoho.com")
         self.accounts_url = accounts_url or get_secret(
@@ -87,10 +91,9 @@ class ZohoDeskClient:
     def _request(self, method: str, endpoint: str, **kwargs) -> Any:
         url = f"{self.api_domain}/api/{self.API_VERSION}/{endpoint}"
         token = self._get_access_token()
-        headers = {
-            "Authorization": f"Zoho-oauthtoken {token}",
-            "orgId": self.org_id,
-        }
+        headers = {"Authorization": f"Zoho-oauthtoken {token}"}
+        if self.org_id:
+            headers["orgId"] = self.org_id
         if "json" in kwargs:
             headers["Content-Type"] = "application/json"
 
@@ -225,14 +228,3 @@ class ZohoDeskClient:
     def get_article(self, article_id: str) -> dict:
         """Get a single article, including its full HTML body (`answer`)."""
         return self._request("GET", f"articles/{article_id}")
-
-    def search_articles(
-        self, search_str: str, from_index: int = 1, limit: int = 50,
-        department_id: Optional[str] = None,
-    ) -> dict:
-        """Full-text search over Help Center articles (`/articles/search`)."""
-        params: dict[str, Any] = {
-            "searchStr": search_str, "from": from_index, "limit": min(limit, 100)}
-        if department_id:
-            params["departmentId"] = department_id
-        return self._request("GET", "articles/search", params=params)
