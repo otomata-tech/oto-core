@@ -69,6 +69,15 @@ def get_access_token(accounts_url: str, client_id: str, client_secret: str,
 
     Aucun secret ne transite par l'URL ni par les messages d'erreur.
     """
+    # Connexion en DEUX temps (mode server-based) : l'app est posée, le consentement
+    # pas encore donné → pas de refresh token. On le dit clairement ici plutôt que de
+    # laisser Zoho répondre un `invalid_client` incompréhensible.
+    if not refresh_token:
+        raise ZohoAuthError(
+            "Connexion Zoho incomplète : l'app est renseignée mais l'autorisation "
+            "n'a pas encore été donnée. Ouvre le connecteur et clique « Se connecter "
+            "avec Zoho » (ou colle un refresh token si tu utilises un self client).")
+
     k = key or cred_key(accounts_url, client_id, refresh_token)
     cached = _TOKEN_CACHE.get(k)
     if cached and cached[1] > time.time() + 60:

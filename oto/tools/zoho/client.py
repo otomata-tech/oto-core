@@ -32,7 +32,10 @@ class ZohoClient:
         (`.auth`) — jamais sur disque, jamais partagé entre credentials distincts."""
         self.client_id = client_id or require_secret("ZOHO_CLIENT_ID")
         self.client_secret = client_secret or require_secret("ZOHO_CLIENT_SECRET")
-        self.refresh_token = refresh_token or require_secret("ZOHO_REFRESH_TOKEN")
+        # FACULTATIF à la construction : en mode server-based il est obtenu par le
+        # flux de consentement, pas collé. Son absence est signalée au moment
+        # du refresh (message actionnable) plutôt que par une erreur de config.
+        self.refresh_token = refresh_token or get_secret("ZOHO_REFRESH_TOKEN", None)
         self.api_domain = api_domain or get_secret(
             "ZOHO_API_DOMAIN", "https://www.zohoapis.com")
         self.accounts_url = accounts_url or get_secret(

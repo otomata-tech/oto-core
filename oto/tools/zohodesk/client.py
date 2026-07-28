@@ -45,7 +45,10 @@ class ZohoDeskClient:
         l'instance — jamais sur un fichier partagé (fuite cross-user)."""
         self.client_id = client_id or require_secret("ZOHO_DESK_CLIENT_ID")
         self.client_secret = client_secret or require_secret("ZOHO_DESK_CLIENT_SECRET")
-        self.refresh_token = refresh_token or require_secret("ZOHO_DESK_REFRESH_TOKEN")
+        # FACULTATIF à la construction : en mode server-based il est obtenu par le
+        # flux de consentement, pas collé. Son absence est signalée au moment
+        # du refresh (message actionnable) plutôt que par une erreur de config.
+        self.refresh_token = refresh_token or get_secret("ZOHO_DESK_REFRESH_TOKEN", None)
         # org_id (en-tête `orgId`) est OPTIONNEL : les endpoints KB articles
         # résolvent le portail depuis le token mono-org (vérifié empiriquement) →
         # pas de require_secret qui forcerait le champ. Fourni si un endpoint le
