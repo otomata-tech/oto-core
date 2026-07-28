@@ -1307,6 +1307,18 @@ def _map_feed_item(el: dict, included_by_urn: dict) -> dict:
         f"https://www.linkedin.com/feed/update/{activity_urn}"
         if activity_urn else None
     )
+    # POURQUOI ce post remonte dans MON feed (« Untel a commenté ceci », « Untel a
+    # réagi ») : c'est le souvenir le plus fréquent de l'utilisateur — il se rappelle
+    # QUI a fait remonter le post, pas son auteur. Sans ce champ, un post retrouvé
+    # « par rebond » est introuvable dans le miroir (signal #280 : recherche d'un post
+    # vu via le commentaire d'une relation → 0 résultat sur 710 posts miroir).
+    feed_reason = _text_of(_deep_get(el, "header", "text")) or _text_of(el.get("header"))
+    # REPOST : `author_name` est alors le re-partageur et `text` son commentaire de
+    # partage — l'auteur ORIGINAL, celui qu'on cherche, se perdait entièrement.
+    reshared = el.get("resharedUpdate") if isinstance(el.get("resharedUpdate"), dict) else {}
+    if not reshared:
+        reshared = _deep_get(el, "content", "resharedUpdate", default={}) or {}
+    reshared_actor = reshared.get("actor") if isinstance(reshared.get("actor"), dict) else {}
     return {
         "urn": activity_urn or el.get("entityUrn"),
         "author_name": _text_of(actor.get("name")),
@@ -1317,6 +1329,9 @@ def _map_feed_item(el: dict, included_by_urn: dict) -> dict:
         "reactions_count": reactions,
         "comments_count": comments,
         "post_url": post_url,
+        "feed_reason": feed_reason or None,
+        "is_repost": bool(reshared),
+        "original_author_name": _text_of(reshared_actor.get("name")) or None,
     }
 
 

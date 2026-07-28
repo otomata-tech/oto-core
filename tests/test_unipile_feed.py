@@ -146,3 +146,39 @@ def test_posted_at_decodes_timestamp_bits():
 def test_posted_at_rejects_garbage():
     assert _posted_at_from_activity("urn:li:activity:notanumber") is None
     assert _posted_at_from_activity(None) is None
+
+
+# --- Contexte de remontée & repost (signal d'usage #280) ---------------------
+# Le miroir ne gardait qu'auteur/texte/urn/compteurs. Or l'utilisateur se souvient
+# d'un post par QUI l'a fait remonter (« untel a commenté ceci »), et sur un repost
+# l'`author_name` est le re-partageur — l'auteur cherché disparaissait du miroir.
+
+def test_feed_reason_est_capture():
+    el = _update()
+    el["header"] = {"text": {"text": "Marc Dupont a commenté ceci"}}
+    out = parse_feed(_envelope([el]))
+    assert out["items"][0]["feed_reason"] == "Marc Dupont a commenté ceci"
+
+
+def test_repost_expose_l_auteur_original():
+    el = _update()
+    el["resharedUpdate"] = {"actor": {"name": {"text": "Sylvie Martin"}}}
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["is_repost"] is True
+    assert item["original_author_name"] == "Sylvie Martin"
+    assert item["author_name"] == "Jane Doe", "l'auteur de surface reste le re-partageur"
+
+
+def test_post_ordinaire_sans_contexte_ni_repost():
+    item = parse_feed(_envelope([_update()]))["items"][0]
+    assert item["feed_reason"] is None
+    assert item["is_repost"] is False
+    assert item["original_author_name"] is None
+
+
+def test_reshared_imbrique_dans_content_est_vu_aussi():
+    """Voyager range parfois le repartage sous `content` — les deux formes comptent."""
+    el = _update()
+    el["content"] = {"resharedUpdate": {"actor": {"name": {"text": "Léa Bernard"}}}}
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["is_repost"] is True and item["original_author_name"] == "Léa Bernard"
