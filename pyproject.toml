@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "oto-core"
-version = "1.53.0"
+version = "1.54.0"
 description = "Oto connector library — API clients for AI agents (no CLI). Façade CLI = oto-cli."
 readme = "README.md"
 license = { text = "MIT" }
@@ -27,7 +27,11 @@ vivatech = ["o-browser-vivatech"]
 anthropic = ["anthropic>=0.40.0"]
 # pyarrow floor >=23.0.1 : CVE-2023-47248 + CVE-2024-52338 (RCE on untrusted
 # Parquet/IPC) + GHSA-rgxp-2hwp-jwgg (use-after-free reading pre-buffered IPC).
-stock = ["pyarrow>=23.0.1", "pandas>=1.5.0"]
+# `duckdb` est le moteur de lecture des parquets (bilans INPI, stock SIRENE,
+# BOAMP) : sans lui, `oto fr get`/`fr bilans` échouent — et l'extra qui prétend
+# couvrir ce besoin ne l'embarquait pas, si bien que le remède conseillé à
+# l'utilisateur (`pipx install 'oto-cli[all]'`) ne réparait rien.
+stock = ["duckdb>=1.0", "pyarrow>=23.0.1", "pandas>=1.5.0"]
 anonymize = ["faker>=20.0.0"]
 # `cli` = the Typer command surfaces under oto.tools.*.commands, mounted by the
 # oto-cli façade. They import typer, which core clients never do — declare it so
