@@ -64,7 +64,21 @@ def test_fetch_pending(monkeypatch):
                   "reason": "Request not ready yet, try again in 30 seconds"}),
     )
     out = dc.DropcontactClient(api_key="k").fetch("req_1")
-    assert out == {"done": False, "reason": "Request not ready yet, try again in 30 seconds"}
+    assert out == {"done": False, "pending": True,
+                    "reason": "Request not ready yet, try again in 30 seconds"}
+
+
+def test_fetch_unrecognized_reason_is_not_pending(monkeypatch):
+    """An undocumented `reason` (e.g. unknown request_id, if Dropcontact ever
+    returns 200 for that instead of 404) must NOT be reported as `pending` —
+    the caller should not be told to just retry blindly."""
+    monkeypatch.setattr(
+        dc.requests, "get",
+        lambda url, headers=None, params=None, timeout=None: _Resp(
+            200, {"error": False, "success": False, "reason": "unknown request_id"}),
+    )
+    out = dc.DropcontactClient(api_key="k").fetch("bogus")
+    assert out == {"done": False, "pending": False, "reason": "unknown request_id"}
 
 
 def test_fetch_done(monkeypatch):
@@ -109,12 +123,25 @@ def test_submit_raises_on_http_error(monkeypatch):
     assert exc.value.status_code == 401
 
 
+def test_submit_raises_if_no_request_id(monkeypatch):
+    """Undocumented but defensive: a 200 without request_id must not flow through
+    silently (the caller would otherwise poll dropcontact_result(None) forever)."""
+    monkeypatch.setattr(
+        dc.requests, "post",
+        lambda url, headers=None, json=None, timeout=None: _Resp(
+            200, {"error": False, "success": True, "credits_left": 10, "data": []}),
+    )
+    with pytest.raises(RuntimeError, match="pas de request_id"):
+        dc.DropcontactClient(api_key="k").submit([{"email": "a@acme.fr"}])
+
+
 def test_check_credits_uses_empty_contact(monkeypatch):
     captured = {}
 
     def fake_post(url, headers=None, json=None, timeout=None):
         captured.update(json=json)
-        return _Resp(200, {"error": False, "success": True, "credits_left": 100, "data": [{}]})
+        return _Resp(200, {"error": False, "request_id": "req_credits", "success": True,
+                            "credits_left": 100, "data": [{}]})
 
     monkeypatch.setattr(dc.requests, "post", fake_post)
     out = dc.DropcontactClient(api_key="k").check_credits()

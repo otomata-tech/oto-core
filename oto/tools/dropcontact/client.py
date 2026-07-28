@@ -92,12 +92,24 @@ class DropcontactClient:
             timeout=30,
         )
         raise_for_upstream(resp, service="dropcontact")
-        return resp.json()
+        body = resp.json()
+        if not body.get("request_id"):
+            raise RuntimeError(f"Dropcontact POST: pas de request_id dans la réponse: {resp.text[:200]}")
+        return body
+
+    # Sous-chaîne du SEUL libellé "pending" documenté ("Request not ready yet,
+    # try again in 30 seconds") — le comportement de `reason` pour un
+    # request_id inconnu/expiré n'est PAS documenté (peut être un 404, géré par
+    # `raise_for_upstream`, ou un autre texte ici). Ne jamais dire à l'appelant
+    # de réessayer sur un `reason` qu'on ne reconnaît pas.
+    _PENDING_MARKER = "not ready"
 
     def fetch(self, request_id: str, *, force_results: bool = False) -> dict:
         """Un GET de statut, sans attente. Tant que le traitement n'est pas fini,
         Dropcontact répond 200 avec `success: false` (PAS une erreur HTTP) — on le
-        traduit en `{"done": False, "reason": <str>}`. Une fois fini :
+        traduit en `{"done": False, "pending": <bool>, "reason": <str>}` (`pending`
+        distingue le SEUL cas "not ready yet" documenté d'un `reason` inconnu, que
+        l'appelant ne doit pas traiter comme "réessaie plus tard"). Une fois fini :
         `{"done": True, "data": [...], "credits_left": <int>}`.
 
         force_results: renvoie les résultats partiels (items non encore traités
@@ -114,7 +126,12 @@ class DropcontactClient:
         body = resp.json()
 
         if not body.get("success"):
-            return {"done": False, "reason": body.get("reason", "")}
+            reason = body.get("reason", "")
+            return {
+                "done": False,
+                "pending": self._PENDING_MARKER in reason.lower(),
+                "reason": reason,
+            }
 
         return {
             "done": True,
