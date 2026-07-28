@@ -11,6 +11,25 @@ import requests
 from ...config import require_secret
 
 
+class HunterError(RuntimeError):
+    """Erreur API Hunter — message amont (`errors[].details`) remonté tel quel.
+
+    ⚠️ Hunter **inverse** la convention habituelle :
+    - **403** = limite de DÉBIT atteinte → transitoire, réessayer plus tard.
+    - **429** = limite d'USAGE du plan (crédits du mois) → **définitif** sur la
+      période, réessayer ne sert à rien.
+
+    D'où `retryable`, lu par l'appelant : marteler un 429 Hunter est une perte
+    sèche (vécu — 4 appels espacés sur 15 min, quota jamais libéré).
+    """
+
+    def __init__(self, message: str, status_code: Optional[int] = None,
+                 retryable: bool = False):
+        super().__init__(message)
+        self.status_code = status_code
+        self.retryable = retryable
+
+
 class HunterClient:
     """
     Hunter.io API client for:
@@ -30,14 +49,44 @@ class HunterClient:
         """
         self.api_key = api_key or require_secret("HUNTER_API_KEY")
 
-    def _request(self, endpoint: str, params: Dict = None) -> Dict[str, Any]:
-        """Make API request."""
-        url = f"{self.BASE_URL}/{endpoint}"
-        params = params or {}
-        params["api_key"] = self.api_key
+    @staticmethod
+    def _upstream_message(response: requests.Response) -> str:
+        """`errors[].details` de Hunter, sinon un extrait du corps brut."""
+        try:
+            body = response.json()
+        except ValueError:
+            return (response.text or "").strip()[:400]
+        errors = body.get("errors") if isinstance(body, dict) else None
+        if isinstance(errors, list) and errors:
+            parts = [str(e.get("details") or e.get("id") or e)
+                     for e in errors if isinstance(e, dict)]
+            if parts:
+                return " ; ".join(parts)
+        return str(body)[:400]
 
-        response = requests.get(url, params=params)
-        response.raise_for_status()
+    def _request(self, endpoint: str, params: Dict = None) -> Dict[str, Any]:
+        """Make API request. La clé part en **header** (jamais en query string :
+        elle atterrirait dans le message de toute exception). Une erreur HTTP lève
+        `HunterError` portant le message amont et la bonne sémantique de réessai."""
+        url = f"{self.BASE_URL}/{endpoint}"
+
+        response = requests.get(
+            url, params=params or {},
+            headers={"Authorization": f"Bearer {self.api_key}"})
+        if not response.ok:
+            detail = self._upstream_message(response)
+            if response.status_code == 429:
+                raise HunterError(
+                    f"Hunter — limite d'USAGE du plan atteinte (crédits épuisés "
+                    f"sur la période) : {detail}. Réessayer ne libérera rien : "
+                    f"bascule sur un autre enrichisseur ou fais monter le plan.",
+                    status_code=429, retryable=False)
+            if response.status_code == 403:
+                raise HunterError(
+                    f"Hunter — limite de débit atteinte : {detail}. Espace les "
+                    f"appels puis réessaie.", status_code=403, retryable=True)
+            raise HunterError(f"Hunter {response.status_code} sur {endpoint} : {detail}",
+                              status_code=response.status_code)
         return response.json()
 
     def domain_search(self, domain: str, limit: int = 10) -> Dict[str, Any]:

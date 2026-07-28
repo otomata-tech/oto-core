@@ -12,6 +12,20 @@ import requests
 from ...config import require_secret
 
 
+class ApolloError(RuntimeError):
+    """Erreur API Apollo, **message amont remonté tel quel**.
+
+    `raise_for_status()` nu ne donne que « 422 Client Error … <url> » : l'appelant
+    (un agent) ne sait pas QUEL champ est refusé, donc ne peut pas corriger son
+    appel. Apollo, lui, dit précisément ce qui cloche dans le corps de la réponse
+    (`error`/`errors`/`error_message`) — on le propage.
+    """
+
+    def __init__(self, message: str, status_code: Optional[int] = None):
+        super().__init__(message)
+        self.status_code = status_code
+
+
 class ApolloClient:
     """
     Apollo.io API client for:
@@ -20,7 +34,9 @@ class ApolloClient:
     - Job postings lookup
     """
 
-    BASE_URL = "https://api.apollo.io/v1"
+    # Chemin canonique documenté (`/api/v1`) — `/v1` est un alias legacy qui
+    # répond sur enrich/match mais PAS sur les endpoints de recherche.
+    BASE_URL = "https://api.apollo.io/api/v1"
 
     def __init__(self, api_key: str = None):
         """
@@ -39,15 +55,35 @@ class ApolloClient:
             time.sleep(1.0 - elapsed)
         self._last_request = time.time()
 
+    @staticmethod
+    def _upstream_message(response: requests.Response) -> str:
+        """Message d'erreur d'Apollo, sinon un extrait du corps brut."""
+        try:
+            body = response.json()
+        except ValueError:
+            return (response.text or "").strip()[:400]
+        if isinstance(body, dict):
+            for k in ("error_message", "error", "message", "errors"):
+                v = body.get(k)
+                if v:
+                    return v if isinstance(v, str) else str(v)
+        return str(body)[:400]
+
     def _request(self, method: str, endpoint: str, **kwargs) -> Dict[str, Any]:
-        """Make API request."""
+        """Make API request. Une erreur HTTP lève `ApolloError` portant le message
+        AMONT (quel champ est refusé) — pas un « 422 Client Error » opaque."""
         self._rate_limit()
 
         url = f"{self.BASE_URL}/{endpoint}"
         headers = {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
 
         response = requests.request(method, url, headers=headers, **kwargs)
-        response.raise_for_status()
+        if not response.ok:
+            raise ApolloError(
+                f"Apollo {response.status_code} sur {endpoint} : "
+                f"{self._upstream_message(response)}",
+                status_code=response.status_code,
+            )
         return response.json()
 
     def search_organizations(
@@ -68,16 +104,21 @@ class ApolloClient:
 
         Returns:
             Dict with organizations list
+
+        ⚠️ Noms de champs imposés par l'API (`q_organization_name`,
+        `q_organization_domains_list`) : un nom inconnu n'est PAS rejeté, il est
+        **ignoré silencieusement** → la réponse est la base entière (~28 M
+        d'entreprises, top générique Google/Amazon/…) et passe pour un résultat.
         """
         data = {"per_page": per_page}
         if name:
-            data["organization_name"] = name
+            data["q_organization_name"] = name
         if domain:
-            data["organization_domain"] = domain
+            data["q_organization_domains_list"] = [domain]
         if country:
             data["organization_locations"] = [country]
 
-        return self._request("POST", "organizations/search", json=data)
+        return self._request("POST", "mixed_companies/search", json=data)
 
     def enrich_organization(self, domain: str) -> Dict[str, Any]:
         """
@@ -95,40 +136,41 @@ class ApolloClient:
         self,
         domains: List[str] = None,
         org_ids: List[str] = None,
-        departments: List[str] = None,
         titles: List[str] = None,
         seniorities: List[str] = None,
         per_page: int = 25,
         page: int = 1,
     ) -> Dict[str, Any]:
         """
-        Search for people.
+        Search for people (net-new prospecting).
 
         Args:
             domains: Company domains to search
             org_ids: Apollo organization IDs
-            departments: Department filters (e.g., ["engineering", "sales"])
             titles: Title keywords
             seniorities: Seniority levels (e.g., ["c_suite", "director"])
             per_page: Results per page
             page: Page number
 
         Returns:
-            People search results
+            People search results (no email/phone — that's `match_person`)
+
+        ⚠️ L'endpoint est `mixed_people/api_search` et le filtre domaine
+        s'appelle `q_organization_domains_list` : `people/search` +
+        `organization_domains` rendaient un 422 systématique. Il n'existe PAS de
+        filtre « department » sur cette API — cibler par `titles`/`seniorities`.
         """
         data = {"per_page": per_page, "page": page}
         if domains:
-            data["organization_domains"] = domains
+            data["q_organization_domains_list"] = domains
         if org_ids:
             data["organization_ids"] = org_ids
-        if departments:
-            data["person_departments"] = departments
         if titles:
             data["person_titles"] = titles
         if seniorities:
             data["person_seniorities"] = seniorities
 
-        return self._request("POST", "people/search", json=data)
+        return self._request("POST", "mixed_people/api_search", json=data)
 
     def match_person(
         self,
@@ -173,8 +215,8 @@ class ApolloClient:
 
         try:
             return self._request("POST", "people/match", json=data)
-        except requests.HTTPError as e:
-            if e.response.status_code == 404:
+        except ApolloError as e:
+            if e.status_code == 404:
                 return None
             raise
 
