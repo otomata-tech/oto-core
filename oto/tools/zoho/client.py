@@ -7,18 +7,9 @@ import requests
 
 from ...config import require_secret, get_secret
 from ..common import raise_for_upstream
+from .auth import ZohoAuthError, cred_key, get_access_token, invalidate
 
-
-class ZohoAuthError(ValueError):
-    """Refus OAuth Zoho (invalid_client / invalid_code / invalid_grant…).
-
-    Zoho répond HTTP 200 avec l'erreur dans le corps — on porte donc un
-    `status_code` 401 synthétique (contrat `UpstreamHTTPError`) pour que les
-    consommateurs classent ce refus de credential comme erreur gérée, pas un
-    bug. Sous-classe `ValueError` : les `except ValueError` existants tiennent.
-    """
-
-    status_code = 401
+__all__ = ["ZohoAuthError", "ZohoClient"]
 
 
 class ZohoClient:
@@ -37,8 +28,8 @@ class ZohoClient:
         Les credentials peuvent être passés explicitement (usage serveur
         multi-utilisateur : chaque appel construit un client avec les creds
         résolus du user) ou résolus via `require_secret` (usage CLI). Le token
-        d'accès est mis en cache **en mémoire** sur l'instance — jamais sur un
-        fichier partagé (qui fuiterait entre utilisateurs côté serveur)."""
+        d'accès est mis en cache **en mémoire de process**, keyé par credential
+        (`.auth`) — jamais sur disque, jamais partagé entre credentials distincts."""
         self.client_id = client_id or require_secret("ZOHO_CLIENT_ID")
         self.client_secret = client_secret or require_secret("ZOHO_CLIENT_SECRET")
         self.refresh_token = refresh_token or require_secret("ZOHO_REFRESH_TOKEN")
@@ -46,39 +37,23 @@ class ZohoClient:
             "ZOHO_API_DOMAIN", "https://www.zohoapis.com")
         self.accounts_url = accounts_url or get_secret(
             "ZOHO_ACCOUNTS_URL", "https://accounts.zoho.com")
-        self._access_token: Optional[str] = None
-        self._token_expires_at: float = 0.0
+        self._cred_key = cred_key(
+            self.accounts_url, self.client_id, self.refresh_token)
 
     # --- Auth ---
 
     def _get_access_token(self) -> str:
-        """Get a valid access token, refreshing if needed (in-memory cache)."""
-        if self._access_token and self._token_expires_at > time.time() + 60:
-            return self._access_token
-
-        resp = requests.post(
-            f"{self.accounts_url}/oauth/v2/token",
-            params={
-                "grant_type": "refresh_token",
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "refresh_token": self.refresh_token,
-            },
-        )
-        resp.raise_for_status()
-        token_data = resp.json()
-
-        if "error" in token_data:
-            raise ZohoAuthError(f"Zoho OAuth error: {token_data['error']}")
-
-        self._access_token = token_data["access_token"]
-        self._token_expires_at = time.time() + token_data.get("expires_in", 3600)
-        return self._access_token
+        """Token d'accès valide, rafraîchi au besoin. Cache PROCESS-WIDE keyé par
+        credential (#285) : le serveur crée une nouvelle instance de client à chaque
+        appel MCP, un cache d'instance provoquerait un refresh par appel — et Zoho
+        rate-limite alors `/oauth/v2/token` (tous les appels en 400 pendant ~5 min)."""
+        return get_access_token(self.accounts_url, self.client_id,
+                                self.client_secret, self.refresh_token,
+                                key=self._cred_key)
 
     def _invalidate_token(self):
         """Forget the cached token to force a refresh on next request."""
-        self._access_token = None
-        self._token_expires_at = 0.0
+        invalidate(self._cred_key)
 
     # --- HTTP ---
 

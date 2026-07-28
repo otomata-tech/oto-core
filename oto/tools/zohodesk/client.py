@@ -23,7 +23,7 @@ import requests
 
 from ...config import require_secret, get_secret
 from ..common import raise_for_upstream
-from ..zoho import ZohoAuthError
+from ..zoho.auth import ZohoAuthError, cred_key, get_access_token, invalidate
 
 
 class ZohoDeskClient:
@@ -55,36 +55,20 @@ class ZohoDeskClient:
             "ZOHO_DESK_API_DOMAIN", "https://desk.zoho.com")
         self.accounts_url = accounts_url or get_secret(
             "ZOHO_DESK_ACCOUNTS_URL", "https://accounts.zoho.com")
-        self._access_token: Optional[str] = None
-        self._token_expires_at: float = 0.0
+        self._cred_key = cred_key(
+            self.accounts_url, self.client_id, self.refresh_token)
 
     # --- Auth ---
 
     def _get_access_token(self) -> str:
-        if self._access_token and self._token_expires_at > time.time() + 60:
-            return self._access_token
-
-        resp = requests.post(
-            f"{self.accounts_url}/oauth/v2/token",
-            params={
-                "grant_type": "refresh_token",
-                "client_id": self.client_id,
-                "client_secret": self.client_secret,
-                "refresh_token": self.refresh_token,
-            },
-        )
-        resp.raise_for_status()
-        token_data = resp.json()
-        if "error" in token_data:
-            raise ZohoAuthError(f"Zoho Desk OAuth error: {token_data['error']}")
-
-        self._access_token = token_data["access_token"]
-        self._token_expires_at = time.time() + token_data.get("expires_in", 3600)
-        return self._access_token
+        """Token d'accès valide, rafraîchi au besoin — cache process-wide keyé par
+        credential (cf. `..zoho.auth`, #285)."""
+        return get_access_token(self.accounts_url, self.client_id,
+                                self.client_secret, self.refresh_token,
+                                key=self._cred_key)
 
     def _invalidate_token(self):
-        self._access_token = None
-        self._token_expires_at = 0.0
+        invalidate(self._cred_key)
 
     # --- HTTP ---
 

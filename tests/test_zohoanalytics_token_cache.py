@@ -1,18 +1,21 @@
 """#233 : le token Zoho Analytics est caché PROCESS-WIDE (keyé par credential) →
 une NOUVELLE instance de client par appel serveur ne re-refresh PAS à chaque fois
-(sinon rate-limit Zoho sur /oauth/v2/token → 400 intermittent)."""
+(sinon rate-limit Zoho sur /oauth/v2/token → 400 intermittent).
+
+Le cache vit désormais dans `oto.tools.zoho.auth` (partagé CRM/Desk/Analytics,
+#285) — ces tests gardent la garde AU NIVEAU DU CLIENT : ils échouent si le
+client Analytics cesse de passer par le helper commun."""
 import pytest
 
-import oto.tools.zohoanalytics.client as mod
+import oto.tools.zoho.auth as zauth
 from oto.tools.zohoanalytics.client import ZohoAnalyticsClient
 
 
 class _Resp:
+    status_code = 200
+
     def __init__(self, data):
         self._d = data
-
-    def raise_for_status(self):
-        pass
 
     def json(self):
         return self._d
@@ -20,9 +23,9 @@ class _Resp:
 
 @pytest.fixture(autouse=True)
 def _clear_cache():
-    mod._TOKEN_CACHE.clear()
+    zauth._TOKEN_CACHE.clear()
     yield
-    mod._TOKEN_CACHE.clear()
+    zauth._TOKEN_CACHE.clear()
 
 
 def _mk(rt="rt1"):
@@ -31,7 +34,7 @@ def _mk(rt="rt1"):
 
 
 def _count_post(monkeypatch, calls):
-    monkeypatch.setattr(mod.requests, "post",
+    monkeypatch.setattr(zauth.requests, "post",
                         lambda *a, **k: calls.append(1) or _Resp(
                             {"access_token": "TOK", "expires_in": 3600}))
 
