@@ -11,7 +11,8 @@ Secrets expected in environment / ~/.otomata/secrets.env:
   ZOHO_DESK_CLIENT_ID
   ZOHO_DESK_CLIENT_SECRET
   ZOHO_DESK_REFRESH_TOKEN
-  ZOHO_DESK_ORG_ID            (header `orgId` required on every call)
+  ZOHO_DESK_ORG_ID            (header `orgId` — OPTIONAL: a mono-portal token resolves
+                               the portal on its own; sent only when provided)
   ZOHO_DESK_API_DOMAIN        (default https://desk.zoho.com — use .eu / .in if applicable)
   ZOHO_DESK_ACCOUNTS_URL      (default https://accounts.zoho.com — must match the data center)
 """
@@ -23,7 +24,33 @@ import requests
 
 from ...config import require_secret, get_secret
 from ..common import raise_for_upstream
+from ..common.errors import UpstreamHTTPError
 from ..zoho.auth import ZohoAuthError, cred_key, get_access_token, invalidate
+
+
+# Endpoint Desk → scope OAuth qui le débloque. Zoho répond `403 SCOPE_MISMATCH` sans
+# JAMAIS dire quel scope manque — or c'est la seule information utile : le remède est de
+# régénérer le self-client avec ce scope. Un token Desk peut très bien authentifier avec
+# des scopes PARTIELS (cas vécu : les articles répondaient 200 pendant que tickets,
+# contacts et départements rendaient un 403 opaque). Signal d'usage #299.
+_SCOPE_BY_PREFIX = (
+    ("tickets/search", "Desk.search.READ"),
+    ("tickets", "Desk.tickets.{rw}"),
+    ("contacts", "Desk.contacts.{rw}"),
+    ("articles", "Desk.articles.READ"),
+    ("departments", "Desk.basic.READ"),
+    ("organizations", "Desk.basic.READ"),
+)
+
+
+def _required_scope(endpoint: str, method: str) -> Optional[str]:
+    """Scope attendu pour `endpoint`, ou None si l'endpoint n'est pas cartographié."""
+    path = (endpoint or "").split("?", 1)[0].lstrip("/")
+    rw = "READ" if method.upper() in ("GET", "HEAD") else "WRITE"
+    for prefix, scope in _SCOPE_BY_PREFIX:
+        if path.startswith(prefix):
+            return scope.format(rw=rw)
+    return None
 
 
 class ZohoDeskClient:
@@ -97,6 +124,26 @@ class ZohoDeskClient:
                 wait = int(resp.headers.get("Retry-After", 2))
                 time.sleep(wait)
                 continue
+
+            # `403 SCOPE_MISMATCH` : nommer le scope manquant plutôt que de relayer le
+            # code opaque de Zoho (cf. `_SCOPE_BY_PREFIX`). L'appelant sait alors quoi
+            # régénérer, au lieu de deviner lequel des scopes `Desk.*` fait défaut.
+            if resp.status_code == 403:
+                try:
+                    code = (resp.json() or {}).get("errorCode")
+                except Exception:  # noqa: BLE001 — corps illisible : on relaie tel quel
+                    code = None
+                if code == "SCOPE_MISMATCH":
+                    scope = _required_scope(endpoint, method)
+                    detail = (f"il manque le scope `{scope}`" if scope
+                              else "il manque un scope `Desk.*` pour cet appel")
+                    raise UpstreamHTTPError(
+                        403,
+                        f"Zoho Desk refuse cet appel : {detail}. Régénère le self-client "
+                        f"avec ce scope (console api-console.zoho.com), puis rééchange le "
+                        f"grant token contre un refresh token.",
+                        service="zohodesk",
+                    )
 
             raise_for_upstream(resp, service="zohodesk")
 
