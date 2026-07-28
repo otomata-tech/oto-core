@@ -1,66 +1,58 @@
 """
-Reddit read-only client — **RSS feeds** (no auth, no app).
+Reddit read-only client — **redditapis.com** (REST proxy, bearer token).
 
-Reddit closed the unauthenticated `www.reddit.com/*.json` endpoints (HTTP 403
-"Blocked"). The `*.rss` Atom feeds are still served without authentication, so this
-client reads those. Trade-off: RSS exposes title / author / link / date / HTML body,
-but **not** score, upvote ratio, num_comments, nor a nested comment tree — those fields
-come back as ``None``.
+Reddit closed self-service OAuth app registration (Responsible Builder Policy,
+late 2025) and blocks the anonymous ``*.json`` endpoints (HTTP 403 on datacenter
+IPs), so neither the official Data API nor direct scraping is available to us. This
+client reads through **redditapis.com**, a hosted REST proxy that returns clean
+JSON — score, comment count, upvote ratio, real publication date, working ``after``
+pagination, and the native nested comment tree — behind a single ``Authorization:
+Bearer <key>`` header.
 
-⚠️ **Rate limit** : anonymous RSS is throttled hard per IP (a couple of calls then
-HTTP 429 for ~30-45s). A 429 is surfaced as a clear error rather than silently
-retried — this is a best-effort reader, not a high-throughput one.
+Contract (base ``https://api.redditapis.com``, all reads GET) :
+- ``/api/reddit/posts?subreddit=&sort=&t=&after=`` — subreddit listing, any sort
+- ``/api/reddit/search?q=&subreddit=&sort=&t=&after=`` — post search
+- ``/api/reddit/search/communities?q=&after=`` — subreddit discovery (with subscribers)
+- ``/api/reddit/comments/:id?limit=`` — a post + its nested comment tree
 """
 
 from typing import Any, Dict, List, Optional
-from urllib.parse import quote_plus
-import xml.etree.ElementTree as ET  # types Element uniquement — parsing via defusedxml
 
 import requests
-# XML externe non fiable (RSS Reddit) → parseur durci contre XXE / billion-laughs.
-from defusedxml.ElementTree import fromstring as _xml_fromstring
 
-_ATOM = "{http://www.w3.org/2005/Atom}"
-_KIND_BY_PREFIX = {"t1": "comment", "t3": "post", "t5": "subreddit"}
-
-
-class RedditRateLimited(RuntimeError):
-    """Reddit a renvoyé 429 (limite anonyme RSS serrée) — réessaie dans ~30 s."""
+_REDDIT_WEB = "https://reddit.com"
 
 
 class RedditClient:
+    """Reddit read-only via the redditapis.com REST proxy (bearer token).
+
+    Covers subreddit listings, post search, subreddit discovery, and a post's
+    nested comment tree — all with engagement metrics (``score``,
+    ``num_comments``, ``upvote_ratio``) and real timestamps.
     """
-    Reddit read-only via RSS (public feeds, no credential).
 
-    Covers subreddit feeds, search (global or per-sub), subreddit discovery, and a
-    post's comments. Fields absent from RSS (score, votes, num_comments, nesting)
-    are returned as ``None``.
-    """
+    BASE_URL = "https://api.redditapis.com"
 
-    BASE_URL = "https://www.reddit.com"
-    DEFAULT_UA = (
-        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0 Safari/537.36"
-    )
-
-    def __init__(self, user_agent: Optional[str] = None, timeout: int = 15):
+    def __init__(self, api_key: str, timeout: int = 20):
+        if not api_key:
+            raise ValueError("reddit: clé API redditapis.com requise")
         self.session = requests.Session()
-        self.session.headers["User-Agent"] = user_agent or self.DEFAULT_UA
+        self.session.headers["Authorization"] = f"Bearer {api_key}"
+        self.session.headers["Accept"] = "application/json"
         self.timeout = timeout
 
-    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> ET.Element:
-        url = f"{self.BASE_URL}{path}" if path.startswith("/") else path
-        r = self.session.get(url, params=params, timeout=self.timeout, allow_redirects=True)
-        if r.status_code == 429:
-            raise RedditRateLimited(
-                "Reddit a rate-limité la requête (flux RSS anonyme, limite serrée par IP). "
-                "Réessaie dans ~30 s."
-            )
-        r.raise_for_status()
+    def _get(self, path: str, params: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+        r = self.session.get(f"{self.BASE_URL}{path}", params=params, timeout=self.timeout)
+        # Le proxy renvoie parfois 200 + {"error": ...} sur une requête invalide.
         try:
-            return _xml_fromstring(r.content)
-        except Exception as e:  # ParseError, EntitiesForbidden, DTDForbidden…
-            raise RuntimeError(f"réponse Reddit non-XML ou XML rejeté (bloqué ?): {e}") from e
+            data = r.json()
+        except ValueError:
+            r.raise_for_status()
+            raise RuntimeError(f"réponse redditapis non-JSON (HTTP {r.status_code})")
+        if isinstance(data, dict) and data.get("error"):
+            raise RuntimeError(f"redditapis: {data['error']}")
+        r.raise_for_status()
+        return data
 
     # ── Listings ──────────────────────────────────────────────────────────
 
@@ -75,12 +67,12 @@ class RedditClient:
         """List posts from a subreddit. sort: hot|new|top|rising|controversial."""
         if sort not in {"hot", "new", "top", "rising", "controversial"}:
             raise ValueError(f"invalid sort: {sort}")
-        params: Dict[str, Any] = {"limit": min(limit, 100)}
+        params: Dict[str, Any] = {"subreddit": name, "sort": sort, "limit": min(limit, 100)}
         if time and sort in {"top", "controversial"}:
             params["t"] = time
         if after:
             params["after"] = after
-        return _parse_feed(self._get(f"/r/{name}/{sort}.rss", params))
+        return _feed(self._get("/api/reddit/posts", params))
 
     def search(
         self,
@@ -93,120 +85,129 @@ class RedditClient:
     ) -> Dict[str, Any]:
         """Search posts. If `subreddit` is set, restricts to that sub."""
         params: Dict[str, Any] = {
-            "q": query, "sort": sort, "t": time,
-            "limit": min(limit, 100), "type": "link",
+            "q": query, "sort": sort, "t": time, "limit": min(limit, 100),
         }
+        if subreddit:
+            params["subreddit"] = subreddit
         if after:
             params["after"] = after
-        if subreddit:
-            params["restrict_sr"] = "1"
-            path = f"/r/{subreddit}/search.rss"
-        else:
-            path = "/search.rss"
-        return _parse_feed(self._get(path, params))
+        return _feed(self._get("/api/reddit/search", params))
 
     def search_subreddits(self, query: str, limit: int = 25) -> Dict[str, Any]:
-        """Discover subreddits by name/description match."""
-        return _parse_feed(
-            self._get("/subreddits/search.rss", {"q": query, "limit": min(limit, 100)})
-        )
+        """Discover subreddits by name/description match (with subscriber counts)."""
+        data = self._get("/api/reddit/search/communities", {"q": query, "limit": min(limit, 100)})
+        return {
+            "items": [_community(c) for c in data.get("communities", [])],
+            "after": data.get("after"),
+            "source": "redditapis",
+        }
 
     # ── Post + comments ───────────────────────────────────────────────────
 
     def post(self, url_or_id: str, comment_limit: int = 100, depth: int = 5) -> Dict[str, Any]:
-        """Fetch a post and its comments (flat, via the post's RSS feed).
+        """Fetch a post and its **nested** comment tree.
 
-        `depth` is accepted for signature compatibility but ignored — RSS returns a
-        flat comment list, not a nested tree.
+        `depth` bounds how deep the reply tree is walked (0 = top-level only).
         """
-        path = _post_path(url_or_id)
-        feed = self._get(f"{path}.rss", {"limit": comment_limit})
-        # Métadonnées du post = niveau feed (title/link/updated) ; les <entry> sont
-        # les commentaires (t1). Certains flux incluent aussi le post en entry (t3).
-        post = {
-            "kind": "post",
-            "id": _strip_prefix(_text(feed.find(f"{_ATOM}id"))),
-            "title": _text(feed.find(f"{_ATOM}title")),
-            "permalink": _link(feed),
-            "url": _link(feed),
-            "created": _text(feed.find(f"{_ATOM}updated")),
-            "score": None, "upvote_ratio": None, "num_comments": None,
+        pid = _post_id(url_or_id)
+        data = self._get(f"/api/reddit/comments/{pid}", {"limit": comment_limit})
+        comments = [
+            _comment(c, 0, depth)
+            for c in data.get("comments", [])
+            if isinstance(c, dict) and c.get("kind") == "t1"
+        ]
+        return {
+            "post": _post(data.get("post") or {}),
+            "comments": comments,
+            "source": "redditapis",
         }
-        comments: List[Dict[str, Any]] = []
-        for e in feed.findall(f"{_ATOM}entry"):
-            item = _entry_to_item(e)
-            if item["kind"] == "post":
-                # le post lui-même remonté en entry → enrichit selftext/author
-                post["author"] = item["author"]
-                post["selftext"] = item["content_html"]
-            else:
-                comments.append({
-                    "id": item["id"], "author": item["author"],
-                    "body": item["content_html"], "permalink": item["permalink"],
-                    "created": item["created"], "score": None, "replies": [],
-                })
-        return {"post": post, "comments": comments, "source": "rss"}
 
 
 # ── Parsing helpers ───────────────────────────────────────────────────────
 
 
-def _text(el: Optional[ET.Element]) -> Optional[str]:
-    return el.text if el is not None and el.text else None
+def _abs(permalink: Optional[str]) -> Optional[str]:
+    if not permalink:
+        return None
+    return permalink if permalink.startswith("http") else f"{_REDDIT_WEB}{permalink}"
 
 
-def _link(el: ET.Element) -> Optional[str]:
-    ln = el.find(f"{_ATOM}link")
-    return ln.get("href") if ln is not None else None
-
-
-def _strip_prefix(raw: Optional[str]) -> Optional[str]:
-    if not raw:
-        return raw
-    return raw.split("_", 1)[1] if "_" in raw else raw
-
-
-def _entry_to_item(e: ET.Element) -> Dict[str, Any]:
-    raw_id = _text(e.find(f"{_ATOM}id")) or ""
-    prefix = raw_id.split("_", 1)[0] if "_" in raw_id else ""
-    author_el = e.find(f"{_ATOM}author")
-    author = _text(author_el.find(f"{_ATOM}name")) if author_el is not None else None
-    if author and author.startswith("/u/"):
-        author = author[3:]
-    cat = e.find(f"{_ATOM}category")
-    content = e.find(f"{_ATOM}content")
+def _post(p: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize a redditapis post record to the connector's stable shape."""
     return {
-        "kind": _KIND_BY_PREFIX.get(prefix, "unknown"),
-        "id": _strip_prefix(raw_id),
-        "title": _text(e.find(f"{_ATOM}title")),
-        "author": author,
-        "subreddit": cat.get("term") if cat is not None else None,
-        "permalink": _link(e),
-        "url": _link(e),
-        "created": _text(e.find(f"{_ATOM}published")) or _text(e.find(f"{_ATOM}updated")),
-        "content_html": content.text if content is not None else None,
-        # Champs indisponibles via RSS :
-        "score": None, "upvote_ratio": None, "num_comments": None,
-        "flair": None, "over_18": None,
+        "kind": "post",
+        "id": p.get("id"),
+        "title": p.get("title"),
+        "author": p.get("author"),
+        "subreddit": p.get("subreddit"),
+        "score": p.get("upvotes"),
+        "num_comments": p.get("comments"),
+        "upvote_ratio": p.get("upvote_ratio"),
+        "created": p.get("created"),            # ISO 8601
+        "created_utc": p.get("created_utc"),    # epoch seconds
+        "permalink": _abs(p.get("permalink")),
+        "url": p.get("url"),                    # canonical reddit URL
+        "external_url": p.get("link_url"),      # link the post points to (if any)
+        "selftext": p.get("text") or None,
+        "over_18": p.get("over_18"),
+        "stickied": p.get("stickied"),
+        "locked": p.get("locked"),
+        "spoiler": p.get("spoiler"),
     }
 
 
-def _parse_feed(feed: ET.Element) -> Dict[str, Any]:
-    items = [_entry_to_item(e) for e in feed.findall(f"{_ATOM}entry")]
+def _feed(data: Dict[str, Any]) -> Dict[str, Any]:
     return {
-        "items": items,
-        "after": None,   # RSS ne renvoie pas de curseur de pagination
-        "before": None,
-        "source": "rss",
-        "note": "via RSS — score / votes / num_comments / arbre de commentaires indisponibles",
+        "items": [_post(p) for p in data.get("posts", [])],
+        "after": data.get("after"),
+        "before": data.get("before"),
+        "source": "redditapis",
     }
 
 
-def _post_path(url_or_id: str) -> str:
-    s = url_or_id.strip()
-    if s.startswith("http"):
-        from urllib.parse import urlparse
-        return urlparse(s).path.rstrip("/")
-    if s.startswith("/r/"):
-        return s.rstrip("/")
-    return f"/comments/{quote_plus(s)}"
+def _community(c: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "name": c.get("name") or c.get("display_name_prefixed"),
+        "title": c.get("title"),
+        "description": c.get("public_description") or c.get("description"),
+        "subscribers": c.get("subscribers"),
+        "url": _abs(c.get("url")),
+        "over_18": c.get("over_18"),
+        "created_utc": c.get("created_utc"),
+    }
+
+
+def _comment(node: Dict[str, Any], depth: int, max_depth: int) -> Dict[str, Any]:
+    """Recursively normalize a native Reddit t1 comment into a nested node."""
+    d = node.get("data") or {}
+    out = {
+        "id": d.get("id"),
+        "author": d.get("author"),
+        "body": d.get("body"),
+        "score": d.get("score"),
+        "created_utc": d.get("created_utc"),
+        "permalink": _abs(d.get("permalink")),
+        "replies": [],
+    }
+    if depth < max_depth:
+        replies = d.get("replies")
+        children = (
+            (replies.get("data") or {}).get("children", [])
+            if isinstance(replies, dict) else []
+        )
+        out["replies"] = [
+            _comment(ch, depth + 1, max_depth)
+            for ch in children
+            if isinstance(ch, dict) and ch.get("kind") == "t1"
+        ]
+    return out
+
+
+def _post_id(url_or_id: str) -> str:
+    """Extract a bare post id from a full URL, a permalink, or a t3_ fullname."""
+    s = (url_or_id or "").strip()
+    if "/comments/" in s:
+        return s.split("/comments/", 1)[1].split("/", 1)[0]
+    if s.startswith("t3_"):
+        return s[3:]
+    return s
