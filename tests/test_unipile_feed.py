@@ -122,6 +122,64 @@ def test_count_truncates_page():
     assert out["count"] == 3
 
 
+def test_surfacing_context_is_kept():
+    """« X a commenté ceci » : la RAISON de remontée et son auteur sont conservés
+    (feedback #280 — social selling par rebond)."""
+    el = _update()
+    el["header"] = {
+        "text": {
+            "text": "Sylvie Martin a commenté ceci",
+            "attributes": [{"start": 0, "length": 13}],
+        }
+    }
+    item = parse_feed(_envelope([el]), count=20)["items"][0]
+    assert item["feed_reason"] == "Sylvie Martin a commenté ceci"
+    assert item["surfaced_by"] == "Sylvie Martin"
+
+
+def test_social_context_is_the_fallback_reason():
+    el = _update()
+    el["socialContext"] = {"text": "Paul Durand et 3 autres ont réagi"}
+    item = parse_feed(_envelope([el]), count=20)["items"][0]
+    assert item["feed_reason"] == "Paul Durand et 3 autres ont réagi"
+    assert item["surfaced_by"] is None  # pas d'annotation → pas de nom inventé
+
+
+def test_no_surfacing_context_means_none():
+    item = parse_feed(_envelope([_update()]), count=20)["items"][0]
+    assert item["feed_reason"] is None
+    assert item["surfaced_by"] is None
+    assert item["comment_authors"] == []
+
+
+def test_comment_authors_from_social_detail():
+    el = _update()
+    el.pop("*socialDetail")
+    el["socialDetail"] = {
+        "comments": {"elements": [
+            {"commenter": {"name": {"text": "Sylvie Martin"}}},
+            {"commenter": {"name": {"text": "Paul Durand"}}},
+            {"commenter": {"name": {"text": "Sylvie Martin"}}},  # dédupliqué
+        ]}
+    }
+    item = parse_feed(_envelope([el]), count=20)["items"][0]
+    assert item["comment_authors"] == ["Sylvie Martin", "Paul Durand"]
+
+
+def test_comment_authors_from_included_comments_of_this_activity():
+    """Les commentaires joints dans `included` portent l'id d'activité dans leur
+    urn → rattachables au bon post ; ceux d'un autre post sont ignorés."""
+    activity = "urn:li:activity:7234567890123456789"
+    included = [
+        {"entityUrn": f"urn:li:fsd_comment:(urn:li:comment:(activity:1,99),{activity})",
+         "commenter": {"title": {"text": "Sylvie Martin"}}},
+        {"entityUrn": "urn:li:fsd_comment:(urn:li:comment:(activity:2,98),urn:li:activity:42)",
+         "commenter": {"title": {"text": "Autre Post"}}},
+    ]
+    item = parse_feed(_envelope([_update()], included=included), count=20)["items"][0]
+    assert item["comment_authors"] == ["Sylvie Martin"]
+
+
 def test_unpack_cursor_variants():
     assert _unpack_cursor(None) == (0, None)
     assert _unpack_cursor("") == (0, None)

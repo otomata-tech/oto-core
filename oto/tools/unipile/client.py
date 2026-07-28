@@ -1293,6 +1293,85 @@ def _social_counts(el: dict, included_by_urn: dict) -> tuple[Optional[int], Opti
     return reactions, comments
 
 
+def _annotated_entity(node: Any) -> Optional[str]:
+    """Nom de la PREMIÈRE entité annotée d'un texte Voyager. Voyager livre ses
+    libellés en texte annoté — `{text: "Jean Dupont a commenté ceci", attributes:
+    [{start, length, …}]}` — où la 1re annotation couvre l'acteur. On en découpe
+    la tranche plutôt que de deviner par expression régulière (indépendant de la
+    langue de l'interface). None si la forme n'est pas celle-là."""
+    if not isinstance(node, dict):
+        return None
+    text = node.get("text")
+    if isinstance(text, dict):  # `{text: {text, attributes}}`
+        return _annotated_entity(text)
+    attrs = node.get("attributes")
+    if not isinstance(text, str) or not isinstance(attrs, list) or not attrs:
+        return None
+    first = attrs[0]
+    if not isinstance(first, dict):
+        return None
+    start, length = first.get("start"), first.get("length")
+    if not isinstance(start, int) or not isinstance(length, int) or length <= 0:
+        return None
+    name = text[start:start + length].strip()
+    return name or None
+
+
+def _feed_context(el: dict) -> tuple[Optional[str], Optional[str]]:
+    """(feed_reason, surfaced_by) — POURQUOI ce post remonte dans MON feed.
+
+    Un post d'inconnu apparaît presque toujours par REBOND d'une relation : « X a
+    commenté ceci », « X a réagi », repartage. Cette raison est le cœur du social
+    selling par rebond (qui de mon réseau interagit avec qui) et elle était perdue
+    au mapping (feedback #280) : `feed_reason` = le libellé Voyager verbatim,
+    `surfaced_by` = le nom de la relation à l'origine de la remontée.
+
+    Best-effort : `header` (emplacement usuel du libellé de rebond) puis
+    `socialContext`. Aucune des deux ⇒ (None, None) = post remonté directement."""
+    for node in (el.get("header"), el.get("socialContext")):
+        reason = _text_of(node)
+        if reason:
+            return reason, _annotated_entity(node)
+    return None, None
+
+
+def _comment_authors(el: dict, included_by_urn: dict,
+                     activity_urn: Optional[str]) -> list[str]:
+    """Auteurs des commentaires visibles sur cet update, dans l'ordre de rencontre.
+
+    Le feed ne porte pas les commentaires complets, mais Voyager y joint les
+    commentaires MIS EN AVANT (ceux qui font remonter le post) : à défaut du fil
+    entier, garder QUI a commenté suffit à répondre « qui de mon réseau interagit
+    avec qui » (feedback #280). Deux pistes : le `socialDetail` (inline ou
+    déréférencé) puis les objets `comment` d'`included` rattachés à cette activité
+    (leur `entityUrn` porte l'id d'activité). Best-effort, dédupliqué."""
+    names: list[str] = []
+
+    def _add(commenter: Any) -> None:
+        if isinstance(commenter, str):  # référence `*commenter` → included
+            commenter = included_by_urn.get(commenter)
+        name = (_text_of(_deep_get(commenter, "name"))
+                or _text_of(_deep_get(commenter, "title"))
+                or _text_of(commenter))
+        if name and name not in names:
+            names.append(name)
+
+    sd = el.get("socialDetail")
+    if sd is None:
+        ref = el.get("*socialDetail")
+        if isinstance(ref, str):
+            sd = included_by_urn.get(ref)
+    for c in _deep_get(sd, "comments", "elements", default=[]) or []:
+        if isinstance(c, dict):
+            _add(c.get("commenter") or c.get("*commenter"))
+
+    if activity_urn:
+        for urn, obj in included_by_urn.items():
+            if "comment" in urn.lower() and activity_urn in urn and isinstance(obj, dict):
+                _add(obj.get("commenter") or obj.get("*commenter"))
+    return names
+
+
 def _map_feed_item(el: dict, included_by_urn: dict) -> dict:
     """Un update Voyager → item normalisé. Lève si `el` n'est pas un update
     exploitable (ni actor ni commentary) — l'appelant gère le fallback."""
@@ -1303,16 +1382,19 @@ def _map_feed_item(el: dict, included_by_urn: dict) -> dict:
 
     activity_urn = _activity_urn_from(el)
     reactions, comments = _social_counts(el, included_by_urn)
-    post_url = (
-        f"https://www.linkedin.com/feed/update/{activity_urn}"
-        if activity_urn else None
-    )
     # POURQUOI ce post remonte dans MON feed (« Untel a commenté ceci », « Untel a
     # réagi ») : c'est le souvenir le plus fréquent de l'utilisateur — il se rappelle
     # QUI a fait remonter le post, pas son auteur. Sans ce champ, un post retrouvé
     # « par rebond » est introuvable dans le miroir (signal #280 : recherche d'un post
     # vu via le commentaire d'une relation → 0 résultat sur 710 posts miroir).
-    feed_reason = _text_of(_deep_get(el, "header", "text")) or _text_of(el.get("header"))
+    # `_feed_context` lit `header` PUIS `socialContext` (repli) et rend aussi le NOM de
+    # la relation à l'origine de la remontée — une lecture du seul `header` perdait les
+    # deux.
+    feed_reason, surfaced_by = _feed_context(el)
+    post_url = (
+        f"https://www.linkedin.com/feed/update/{activity_urn}"
+        if activity_urn else None
+    )
     # REPOST : `author_name` est alors le re-partageur et `text` son commentaire de
     # partage — l'auteur ORIGINAL, celui qu'on cherche, se perdait entièrement.
     reshared = el.get("resharedUpdate") if isinstance(el.get("resharedUpdate"), dict) else {}
@@ -1328,8 +1410,12 @@ def _map_feed_item(el: dict, included_by_urn: dict) -> dict:
         "posted_relative": _text_of(actor.get("subDescription")),
         "reactions_count": reactions,
         "comments_count": comments,
+        # Pourquoi ce post remonte + qui l'a fait remonter + qui a commenté
+        # (feedback #280 : le rebond par une relation était perdu au mapping).
+        "feed_reason": feed_reason,
+        "surfaced_by": surfaced_by,
+        "comment_authors": _comment_authors(el, included_by_urn, activity_urn),
         "post_url": post_url,
-        "feed_reason": feed_reason or None,
         "is_repost": bool(reshared),
         "original_author_name": _text_of(reshared_actor.get("name")) or None,
     }
