@@ -1,6 +1,6 @@
 # Notion Tool
 
-Notion API integration for the 654 MEMENTO platform. Provides atomic methods for managing Notion workspaces, databases, and pages.
+Notion API integration for the oto platform. Provides atomic methods for managing Notion workspaces, databases, and pages.
 
 ## Features
 
@@ -18,7 +18,7 @@ Notion API integration for the 654 MEMENTO platform. Provides atomic methods for
 
 1. Go to [https://www.notion.so/my-integrations](https://www.notion.so/my-integrations)
 2. Click "New integration"
-3. Name it (e.g., "MEMENTO Integration")
+3. Name it (e.g., "oto Integration")
 4. Select capabilities:
    - ✅ Read content
    - ✅ Update content
@@ -295,9 +295,9 @@ All dependencies are standard Python libraries or commonly available.
 - Keep token file permissions restrictive (`chmod 600`)
 - Rotate tokens if compromised
 
-## Integration with MEMENTO
+## Integration with oto
 
-This tool is registered in the MEMENTO tools registry and can be discovered at:
+This tool is registered in the oto tools registry and can be discovered at:
 - Web: http://localhost:8001/tools/notion/
 - JSON: `/tools/notion/notion.json`
 
@@ -306,5 +306,5 @@ This tool is registered in the MEMENTO tools registry and can be discovered at:
 For Notion API documentation:
 - https://developers.notion.com/
 
-For MEMENTO platform issues:
+For oto platform issues:
 - See main repository documentation

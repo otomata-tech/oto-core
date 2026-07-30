@@ -176,7 +176,7 @@ python3 create_folder.py \
 }
 ```
 
-## Usage in Memento Runs
+## Usage in oto Runs
 
 Example agent that uses this tool:
 
