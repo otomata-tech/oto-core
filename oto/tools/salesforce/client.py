@@ -1,8 +1,9 @@
 """Salesforce REST API Client — https://developer.salesforce.com/docs/atlas.en-us.api_rest.meta/api_rest/"""
 
 import base64
+import hashlib
 import time
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 import requests
 
@@ -19,6 +20,21 @@ class SalesforceAuthError(ValueError):
     """
 
     status_code = 401
+
+
+# Cache de jeton d'accès PROCESS-WIDE, keyé par hash du credential — même motif que
+# `oto.tools.zoho.auth._TOKEN_CACHE`, et pour la même raison : côté serveur, une
+# instance de client est créée à CHAQUE appel MCP.
+# {clé: (access_token, instance_url, expires_at)}
+_TOKEN_CACHE: dict[str, tuple[str, str, float]] = {}
+
+
+def _cred_key(login_url: str, client_id: str, refresh_token: str) -> str:
+    """Isole les credentials entre eux SANS jamais garder un secret en clair comme
+    clé. Le refresh_token en fait partie : après rotation, la clé change, donc une
+    entrée liée à l'ancien jeton n'est jamais resservie."""
+    return hashlib.sha256(
+        f"{login_url}|{client_id}|{refresh_token}".encode()).hexdigest()
 
 
 class SalesforceClient:
@@ -39,6 +55,7 @@ class SalesforceClient:
         client_secret: Optional[str] = None,
         refresh_token: Optional[str] = None,
         login_url: Optional[str] = None,
+        on_refresh: Optional[Callable[[dict], None]] = None,
     ):
         """Initialise le client.
 
@@ -48,7 +65,22 @@ class SalesforceClient:
         d'accès ET l'`instance_url` (renvoyé par le refresh — pas de table de
         région fixe comme Zoho) sont mis en cache **en mémoire** sur l'instance —
         jamais sur un fichier partagé (qui fuiterait entre utilisateurs côté
-        serveur)."""
+        serveur).
+
+        ⚠️ Ce cache d'instance ne suffit pas côté serveur : une instance est créée à
+        CHAQUE appel MCP, donc il ne sert jamais. Le vrai cache est **process-wide**,
+        keyé par un hash du credential (`_TOKEN_CACHE`), même motif que
+        `oto.tools.zoho.auth` — sans lui on rafraîchit à chaque appel d'outil, ce qui
+        sous rotation revient à faire tourner le jeton à chaque appel.
+
+        `on_refresh(token_data)` est appelé après chaque rafraîchissement réussi,
+        avec la réponse complète du serveur de jetons. C'est le seul moyen pour
+        l'appelant de voir ce que Salesforce renvoie — et notamment un
+        **`refresh_token` renouvelé** : sous rotation (RTR, obligatoire sur les
+        External Client Apps), chaque échange invalide le jeton précédent et en
+        renvoie un neuf. Le jeter — ce que faisait cette classe — révoque la
+        connexion dès le premier usage.
+        """
         self.client_id = client_id or require_secret("SALESFORCE_CLIENT_ID")
         self.client_secret = client_secret or require_secret("SALESFORCE_CLIENT_SECRET")
         self.refresh_token = refresh_token or require_secret("SALESFORCE_REFRESH_TOKEN")
@@ -57,6 +89,7 @@ class SalesforceClient:
         self._access_token: Optional[str] = None
         self._instance_url: Optional[str] = None
         self._token_expires_at: float = 0.0
+        self._on_refresh = on_refresh
 
     # --- Auth ---
 
@@ -66,6 +99,18 @@ class SalesforceClient:
         fixed window and re-refresh on 401, like the Zoho client."""
         if self._access_token and self._token_expires_at > time.time():
             return self._access_token, self._instance_url  # type: ignore[return-value]
+
+        # Cache PROCESS-WIDE (motif `oto.tools.zoho.auth`) : le serveur crée un client
+        # par appel MCP, donc le cache d'instance ci-dessus ne sert jamais. Sans lui on
+        # rafraîchit à chaque appel d'outil — et sous rotation (RTR), rafraîchir c'est
+        # faire tourner le jeton. La clé est un HASH du credential, jamais un secret en
+        # clair, et elle inclut le refresh_token : un jeton renouvelé produit une clé
+        # neuve, donc aucune entrée périmée n'est servie après rotation.
+        k = _cred_key(self.login_url, self.client_id, self.refresh_token)
+        cached = _TOKEN_CACHE.get(k)
+        if cached and cached[2] > time.time() + 60:
+            self._access_token, self._instance_url, self._token_expires_at = cached
+            return self._access_token, self._instance_url
 
         resp = requests.post(
             f"{self.login_url}/services/oauth2/token",
@@ -99,10 +144,36 @@ class SalesforceClient:
         self._access_token = token_data["access_token"]
         self._instance_url = token_data["instance_url"]
         self._token_expires_at = time.time() + 3600
+        _TOKEN_CACHE[k] = (self._access_token, self._instance_url,
+                           self._token_expires_at)
+
+        # ROTATION (RTR) : sous ce régime — obligatoire sur les External Client
+        # Apps — Salesforce invalide le jeton qu'on vient d'utiliser et en renvoie
+        # un neuf ici. On l'adopte pour la suite de la vie de cette instance, et on
+        # laisse l'appelant le persister via `on_refresh` : sans ça, le credential
+        # stocké est révoqué dès le premier appel, et toute réutilisation ultérieure
+        # fait révoquer par Salesforce le jeton courant ET les access tokens
+        # associés — la connexion tombe et exige une reconnexion humaine.
+        rotated = token_data.get("refresh_token")
+        if rotated:
+            self.refresh_token = rotated
+        if self._on_refresh is not None:
+            # Best-effort : une panne de persistance ne doit pas faire échouer un
+            # appel dont le jeton d'accès, lui, est valide.
+            try:
+                self._on_refresh(token_data)
+            except Exception:  # noqa: BLE001 — la persistance est un effet de bord
+                pass
         return self._access_token, self._instance_url
 
     def _invalidate_token(self):
-        """Forget the cached token to force a refresh on next request."""
+        """Forget the cached token to force a refresh on next request.
+
+        Purge AUSSI l'entrée process-wide : ne vider que le cache d'instance
+        laisserait le prochain appel MCP resservir le jeton qu'on vient de juger
+        mort (un 401 relancerait alors la même requête à l'identique)."""
+        _TOKEN_CACHE.pop(
+            _cred_key(self.login_url, self.client_id, self.refresh_token), None)
         self._access_token = None
         self._token_expires_at = 0.0
 
