@@ -92,33 +92,98 @@ class ApolloClient:
         domain: str = None,
         country: str = None,
         per_page: int = 10,
+        page: int = 1,
+        employee_ranges: List[str] = None,
+        revenue_min: int = None,
+        revenue_max: int = None,
+        locations: List[str] = None,
+        keywords: List[str] = None,
+        technologies: List[str] = None,
+        org_ids: List[str] = None,
     ) -> Dict[str, Any]:
         """
-        Search for organizations.
+        Search for organizations (firmographics en lot).
 
         Args:
             name: Company name to search
             domain: Domain to search
-            country: Country filter
-            per_page: Results per page
+            country: Country filter (raccourci de `locations`)
+            per_page: Results per page (≤100)
+            page: Page number
+            employee_ranges: Tranches d'effectif, bornes INCLUSES au format
+                "min,max" — ex. ["1,10", "11,50"]. LE filtre de qualification par
+                taille.
+            revenue_min / revenue_max: bornes de chiffre d'affaires annuel
+            locations: villes/régions/pays du SIÈGE
+            keywords: mots-clés d'activité (`q_organization_keyword_tags`)
+            technologies: uids de technologies utilisées (ex. "salesforce")
+            org_ids: ids Apollo d'organisations
 
         Returns:
             Dict with organizations list
+
+        ⚠️ La réponse ne porte PAS `estimated_num_employees` (vérifié) — seulement
+        le CA et les taux de croissance d'effectif. Pour l'effectif exact et sa
+        répartition par département : `enrich_organization` / `bulk_enrich_organizations`.
+        D'où l'intérêt de `employee_ranges` : on FILTRE par taille sans payer un
+        enrichissement par entreprise (coût Apollo : 1 crédit la PAGE de 100 ici,
+        contre 1 crédit l'ENTREPRISE en enrichissement).
 
         ⚠️ Noms de champs imposés par l'API (`q_organization_name`,
         `q_organization_domains_list`) : un nom inconnu n'est PAS rejeté, il est
         **ignoré silencieusement** → la réponse est la base entière (~28 M
         d'entreprises, top générique Google/Amazon/…) et passe pour un résultat.
         """
-        data = {"per_page": per_page}
+        data: Dict[str, Any] = {"per_page": per_page, "page": page}
         if name:
             data["q_organization_name"] = name
         if domain:
             data["q_organization_domains_list"] = [domain]
-        if country:
-            data["organization_locations"] = [country]
+        locs = list(locations or []) + ([country] if country else [])
+        if locs:
+            data["organization_locations"] = locs
+        if employee_ranges:
+            data["organization_num_employees_ranges"] = employee_ranges
+        if revenue_min is not None or revenue_max is not None:
+            rng = {}
+            if revenue_min is not None:
+                rng["min"] = revenue_min
+            if revenue_max is not None:
+                rng["max"] = revenue_max
+            data["revenue_range"] = rng
+        if keywords:
+            data["q_organization_keyword_tags"] = keywords
+        if technologies:
+            data["currently_using_any_of_technology_uids"] = technologies
+        if org_ids:
+            data["organization_ids"] = org_ids
 
         return self._request("POST", "mixed_companies/search", json=data)
+
+    #: Plafond imposé par l'API sur `organizations/bulk_enrich`.
+    BULK_ENRICH_MAX = 10
+
+    def bulk_enrich_organizations(self, domains: List[str]) -> Dict[str, Any]:
+        """
+        Enrichit jusqu'à 10 entreprises en UN appel (firmographics complètes :
+        `estimated_num_employees`, `departmental_head_count`, croissance, CA…).
+
+        Args:
+            domains: domaines des entreprises (≤10 — plafond de l'API)
+
+        ⚠️ Le lot n'économise PAS de crédits (1 crédit par organisation, comme en
+        unitaire) : il économise des APPELS — le rate limit d'`organizations/enrich`
+        est de 600/h, donc ÷10 sur une campagne.
+        """
+        doms = [d.strip() for d in (domains or []) if d and d.strip()]
+        if not doms:
+            raise ValueError("domains requis (au moins un domaine)")
+        if len(doms) > self.BULK_ENRICH_MAX:
+            raise ValueError(
+                f"{len(doms)} domaines : l'API en accepte {self.BULK_ENRICH_MAX} "
+                "au maximum par appel — découpe en lots")
+        return self._request("POST", "organizations/bulk_enrich",
+                             params={"domains[]": doms})
 
     def enrich_organization(self, domain: str) -> Dict[str, Any]:
         """
