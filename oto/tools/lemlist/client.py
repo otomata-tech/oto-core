@@ -16,6 +16,7 @@ from typing import Optional, Dict, Any, List
 import requests
 
 from ...config import require_secret
+from ..common import raise_for_upstream
 
 
 @dataclass
@@ -91,7 +92,7 @@ class LemlistClient:
         headers = {"Authorization": self._get_auth_header()}
 
         response = requests.request(method, url, headers=headers, **kwargs)
-        response.raise_for_status()
+        raise_for_upstream(response, service="lemlist")
 
         if response.content:
             return response.json()
@@ -400,6 +401,74 @@ class LemlistClient:
     def delete_lead(self, campaign_id: str, email: str) -> Dict[str, Any]:
         """Remove lead from campaign."""
         return self._request("DELETE", f"campaigns/{campaign_id}/leads/{email}")
+
+    def create_lead(
+        self,
+        campaign_id: str,
+        lead: Dict[str, Any],
+        *,
+        deduplicate: bool = False,
+        linkedin_enrichment: bool = False,
+        find_email: bool = False,
+        verify_email: bool = False,
+        find_phone: bool = False,
+    ) -> Dict[str, Any]:
+        """Create a lead in a campaign (current API: POST /campaigns/{id}/leads/,
+        email in the body — distinct from the legacy `add_lead`/{email}-in-path
+        endpoint above).
+
+        Args:
+            campaign_id: Campaign ID.
+            lead: Lead fields — email, firstName, lastName, companyName, jobTitle,
+                linkedinUrl, picture, phone, companyDomain, icebreaker, timezone
+                (IANA, e.g. "Europe/Paris"), contactOwner (user ID or login
+                email). All optional per the API; any other key is stored as a
+                custom variable.
+            deduplicate: Skip the insert if the email already exists in another
+                campaign.
+            linkedin_enrichment: Run LinkedIn enrichment on the lead.
+            find_email: Find a verified email for the lead.
+            verify_email: Verify the lead's existing email (debounce).
+            find_phone: Find a phone number for the lead.
+
+        Returns the created lead, including `_id` (used by `launch_lead` and
+        `add_lead_variables`).
+        """
+        flags = {
+            "deduplicate": deduplicate,
+            "linkedinEnrichment": linkedin_enrichment,
+            "findEmail": find_email,
+            "verifyEmail": verify_email,
+            "findPhone": find_phone,
+        }
+        params = {k: "true" for k, v in flags.items() if v}
+        return self._request(
+            "POST", f"campaigns/{campaign_id}/leads/", json=lead, params=params,
+        )
+
+    def launch_lead(self, lead_id: str) -> Dict[str, Any]:
+        """Launch a lead pending manual review (POST /leads/review/{leadId}).
+
+        Only relevant for a campaign with review-before-send enabled — such a
+        campaign leaves a newly created lead paused for review until launched.
+        Returns `{"ok": true}` on success; a 400 raises `UpstreamHTTPError` whose
+        body carries a lemlist error code, e.g.
+        `CAMPAIGN_LEAD_REVIEW_LEAD_ALREADY_LAUNCHED`,
+        `CAMPAIGN_LEAD_REVIEW_LEAD_PAUSED`,
+        `CAMPAIGN_LEAD_REVIEW_LEAD_AI_VARIABLE_INVALID`,
+        `CAMPAIGN_LEAD_REVIEW_LEAD_NO_SENDER_AVAILABLE`,
+        `CAMPAIGN_LEAD_REVIEW_CAMPAIGN_STEP_ERRORS`.
+        """
+        return self._request("POST", f"leads/review/{lead_id}")
+
+    def add_lead_variables(self, lead_id: str, variables: Dict[str, str]) -> Dict[str, Any]:
+        """Add/set custom variables on a lead (POST /leads/{leadId}/variables).
+
+        `variables` is sent as query parameters — the lemlist API contract for
+        this endpoint (arbitrary keys, e.g. `{"customField1": "..."}`), not a
+        JSON body.
+        """
+        return self._request("POST", f"leads/{lead_id}/variables", params=variables)
 
     def export_leads(self, campaign_id: str, state: str = None) -> str:
         """Export leads from campaign as CSV."""
