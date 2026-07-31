@@ -81,15 +81,29 @@ class CheckCrmClient:
             body["subsidiaryName"] = subsidiary_name
         return self._request("POST", "companies/subsidiaries", json=body)
 
-    def list_subsidiaries(self, company_linkedin_url: str) -> Dict[str, Any]:
-        """GET /companies/subsidiaries — list the subsidiaries of a parent company.
+    def list_subsidiaries(
+        self,
+        slug: Optional[str] = None,
+        name: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """GET /companies/subsidiaries — list parent companies together with their
+        subsidiaries.
 
-        Raises `UpstreamHTTPError(404)` if this network has no company row for
-        `company_linkedin_url` yet (unlike `add_subsidiary`, this does not
-        auto-create the parent).
+        With neither argument, returns every parent company in this network that has
+        at least one subsidiary, each with its full nested subsidiary list. `slug`
+        matches a bare LinkedIn company slug (e.g. `"acme-corp"`) — or a full
+        LinkedIn company URL, reduced to its slug — against either a parent company
+        or any of its subsidiaries; numeric LinkedIn IDs are accepted, since
+        subsidiaries may legitimately be numeric (see `add_subsidiary`). `name` is a
+        case-insensitive substring match against a parent's or subsidiary's `name`.
+        Passing both ORs the two filters together rather than requiring both to
+        match. A subsidiary's `slug`/`name` returns the parent it belongs to, with
+        all of that parent's siblings — never a subsidiary alone. No match returns
+        `{"companies": []}`, not an error.
         """
-        return self._request(
-            "GET",
-            "companies/subsidiaries",
-            params={"companyLinkedinUrl": company_linkedin_url},
-        )
+        params: Dict[str, Any] = {}
+        if slug is not None:
+            params["slug"] = slug
+        if name is not None:
+            params["name"] = name
+        return self._request("GET", "companies/subsidiaries", params=params)
