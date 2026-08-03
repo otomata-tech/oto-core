@@ -217,17 +217,45 @@ class GoCardlessClient:
         payments = self.list_payments(status="failed", limit=limit, created_gt=since)
         if isinstance(payments, dict):  # erreur remontée
             return payments
-        rows = []
-        for p in payments:
+
+        # 3 requêtes SÉQUENTIELLES par ligne (mandat, client, motif) + une pause :
+        # sur 200 échecs, 600 allers-retours en file indienne — 186 s mesurés en
+        # prod, le seul tool encore capable de retenir un worker trois minutes.
+        # Deux leviers, aucun changement de contrat :
+        #  - mémoïser mandat/client, car les échecs se CONCENTRENT (un même débiteur
+        #    rate plusieurs prélèvements, et les relances mensuelles rejouent le même
+        #    mandat) — les doublons ne coûtent plus rien ;
+        #  - enrichir en parallèle borné à 5, ce qui reste loin sous le plafond
+        #    GoCardless (1000 req/min) et rend la pause par ligne inutile.
+        from concurrent.futures import ThreadPoolExecutor
+        from threading import Lock
+
+        cache: dict[str, dict] = {}
+        lock = Lock()
+
+        def _cached(key: str, fetch, ident: Optional[str]) -> dict:
+            if not ident:
+                return {}
+            k = f"{key}:{ident}"
+            with lock:
+                hit = cache.get(k)
+            if hit is not None:
+                return hit
+            got = fetch(ident) or {}
+            with lock:
+                cache[k] = got
+            return got
+
+        def _row(p: dict) -> dict:
             mandate_id = p.get("links", {}).get("mandate")
-            mandate = self.get_mandate(mandate_id) if mandate_id else {}
-            customer_id = mandate.get("links", {}).get("customer")
-            customer = self.get_customer(customer_id) if customer_id else {}
+            mandate = _cached("mandate", self.get_mandate, mandate_id)
+            customer = _cached("customer", self.get_customer,
+                               mandate.get("links", {}).get("customer"))
             name = customer.get("company_name") or " ".join(
                 filter(None, [customer.get("given_name"), customer.get("family_name")])
             )
-            fail = self.failure_reason(p["id"])
-            rows.append({
+            fail = self.failure_reason(p["id"])   # par paiement : jamais mutualisable
+            return {
                 "payment_id": p["id"],
                 "name": name,
                 "email": customer.get("email"),
@@ -240,8 +268,10 @@ class GoCardlessClient:
                 "will_attempt_retry": fail.get("will_attempt_retry"),
                 "mandate_id": mandate_id,
                 "mandate_status": mandate.get("status"),
-            })
-            time.sleep(self.rate_limit_delay)
+            }
+
+        with ThreadPoolExecutor(max_workers=5) as pool:
+            rows = list(pool.map(_row, payments))
         rows.sort(key=lambda r: r.get("failed_at") or "", reverse=True)
         return rows
 
