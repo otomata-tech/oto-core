@@ -163,10 +163,16 @@ class SireneStock:
         enseigne: Optional[str] = None,
         active_only: bool = True,
         sieges_only: bool = False,
+        tranche_effectifs: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
     ) -> Dict[str, Any]:
         """Recherche multi-critères côté serveur (DuckDB). Tous filtres AND.
+
+        `tranche_effectifs` : codes INSEE TEFEN séparés par des virgules
+        (ex. "22,31,32" = 50 salariés et plus). C'est le critère qui fait choisir
+        cette voie plutôt que le tool MCP — énumérer des centaines de sièges PAR
+        TAILLE sans faire transiter le JSON par le contexte de l'agent (signal #331).
 
         Returns: {items: [...], count: N, limit: N, offset: N}
         """
@@ -188,6 +194,8 @@ class SireneStock:
             params["denomination"] = denomination
         if enseigne:
             params["enseigne"] = enseigne
+        if tranche_effectifs:
+            params["tranche_effectifs"] = tranche_effectifs
         data = self._get("/api/sirene/search", params=params)
         data["items"] = [self._normalize(e) for e in data.get("items", [])]
         return data
