@@ -426,6 +426,25 @@ class PennylaneClient:
         `company_customers` (POST/PUT). `company_customers` has no GET → 404."""
         return self.fetch_all_pages("customers", max_pages=max_pages)
 
+    def _filter_eq(self, endpoint: str, field: str, value) -> list:
+        """Lecture par FILTRE SERVEUR natif (`filter=[{field,operator,value}]`).
+
+        Une erreur amont ne doit jamais se lire comme « aucun résultat » : les deux
+        appelants sont des gardes ANTI-DOUBLON, pour qui un faux négatif crée une
+        écriture en trop. Même règle que `fetch_all_pages` (oto-backend#223), que ce
+        chemin en un appel court-circuitait.
+        """
+        import json as _json
+        flt = _json.dumps([{"field": field, "operator": "eq", "value": str(value)}])
+        data = self.fetch(endpoint, {"filter": flt})
+        if isinstance(data, dict) and "error" in data:
+            status = data.get("status_code")
+            if isinstance(status, int):
+                raise UpstreamHTTPError(status, data.get("details") or data["error"],
+                                        service="pennylane")
+            raise RuntimeError(f"pennylane: {data['error']}")
+        return data.get("items", []) if isinstance(data, dict) else []
+
     def find_customer_by_external_reference(self, external_reference: str):
         """Return the customer carrying this `external_reference`, or None.
 
@@ -433,11 +452,7 @@ class PennylaneClient:
         avoir exists (external_reference = the back-office companyId), and creating
         it again fails 422 « External reference has already been taken ». Uses the
         NATIVE server-side filter on `customers` (single call, no scan)."""
-        import json as _json
-        flt = _json.dumps([{"field": "external_reference", "operator": "eq",
-                            "value": str(external_reference)}])
-        data = self.fetch("customers", {"filter": flt})
-        items = data.get("items", []) if isinstance(data, dict) else []
+        items = self._filter_eq("customers", "external_reference", external_reference)
         return items[0] if items else None
 
     def create_customer(self, name: str, emails: list[str] = None,
@@ -603,19 +618,23 @@ class PennylaneClient:
         return self.post(f"customer_invoices/{invoice_id}/link_credit_note",
                          {"credit_note_id": credit_note_id})
 
-    def find_invoice_by_external_reference(self, external_reference: str,
-                                           max_pages: int = 5) -> Optional[dict]:
+    def find_invoice_by_external_reference(self, external_reference: str) -> Optional[dict]:
         """Return the customer invoice carrying this `external_reference`, or None.
 
         Anti-duplicate guard for credit notes: before creating an avoir for a
-        GoCardless payment id, check none already references it. Scans
-        customer_invoices (bounded by max_pages) — no documented server-side
-        filter on external_reference on API v2 yet, so this is a client-side scan.
+        GoCardless payment id, check none already references it. Uses the NATIVE
+        server-side filter (single call, EXHAUSTIVE), like customers.
+
+        C'était un scan client borné à 5 pages : au-delà, une facture existante
+        renvoyait `None` — indistinguable de « aucune », sur le geste dont le rôle
+        est précisément d'empêcher un doublon. Vécu sur AUT-70943, facture bien
+        présente (l'update sur son id répondait « archived invoice ») et pourtant
+        introuvable (signal #268). Le filtre serveur existe sur customer_invoices,
+        vérifié live le 2026-08-03 — la note « no documented server-side filter »
+        n'était plus vraie.
         """
-        for inv in self.get_customer_invoices(max_pages=max_pages):
-            if isinstance(inv, dict) and inv.get("external_reference") == external_reference:
-                return inv
-        return None
+        items = self._filter_eq("customer_invoices", "external_reference", external_reference)
+        return items[0] if items else None
 
     def update_invoice(self, invoice_id: int, **fields) -> dict:
         """Update a draft invoice. Accepts any field (customer_id, date, deadline, etc.)."""
