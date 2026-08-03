@@ -255,6 +255,36 @@ class DriveClient:
         except Exception as e:
             raise DriveClientError(f"Failed to read file {file_id}: {e}")
 
+    def export_file_bytes(self, file_id: str, mime_type: str = 'text/plain') -> Dict:
+        """Exporte un Google Doc/Sheet/Slide natif en MÉMOIRE (octets convertis).
+
+        Retourne {filename, mimeType (celui de la SOURCE), exportedMimeType, size,
+        data: bytes}. Pendant de `get_file_bytes` pour les types Google natifs, qui
+        n'ont pas de contenu binaire à télécharger (`get_media` échoue en 403 « Only
+        files with binary content can be downloaded ») : c'est `files.export` qui
+        rend leur contenu. Sans disque, donc utilisable par un consommateur sans FS
+        (serveur MCP) — l'export ne demande pas de fichier de sortie, seulement une
+        conversion. Formats courants : text/markdown et text/plain (Docs),
+        text/csv (Sheets, 1re feuille), application/pdf, text/html.
+        """
+        try:
+            metadata = self.service.files().get(
+                fileId=file_id, fields='id,name,mimeType',
+                supportsAllDrives=True,
+            ).execute()
+            data = self.service.files().export_media(
+                fileId=file_id, mimeType=mime_type,
+            ).execute()
+            return {
+                'filename': metadata['name'],
+                'mimeType': metadata['mimeType'],
+                'exportedMimeType': mime_type,
+                'size': len(data),
+                'data': data,
+            }
+        except Exception as e:
+            raise DriveClientError(f"Failed to export file {file_id}: {e}")
+
     def export_file(self, file_id: str, output_path: str, mime_type: str = 'text/plain') -> Dict:
         """
         Export a Google Docs/Sheets/Slides file to a specific format.
