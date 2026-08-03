@@ -146,3 +146,48 @@ def test_list_reminders_filters_by_entity_client_side(c, monkeypatch):
     monkeypatch.setattr(c, "_paginate", lambda ep, params=None: list(_NOTES))
     out = c.list_reminders(entity_id="com_B")
     assert [r["id"] for r in out] == ["nte_2"]
+
+
+# --- Traduction des filtres (signal #260 : lister les membres d'un groupe) ---
+
+def test_relation_field_uses_in_id_not_like():
+    """`groups` est une RELATION : Folk y refuse `like` (422 unrecognized_keys) et
+    attend un objet portant l'id — vérifié live le 2026-08-03."""
+    assert folk_client.filter_params({"groups": "grp_42"}) == {
+        "filter[groups][in][id]": "grp_42"}
+    assert folk_client.filter_params({"companies": "cpy_7"}) == {
+        "filter[companies][in][id]": "cpy_7"}
+
+
+def test_text_field_keeps_the_historical_like():
+    assert folk_client.filter_params({"fullName": "Dupont"}) == {
+        "filter[fullName][like]": "Dupont"}
+
+
+def test_explicit_operator_is_honoured():
+    assert folk_client.filter_params({"fullName": {"eq": "Dupont"}}) == {
+        "filter[fullName][eq]": "Dupont"}
+    assert folk_client.filter_params({"emails": {"not_empty": "true"}}) == {
+        "filter[emails][not_empty]": "true"}
+
+
+def test_explicit_relation_operator_still_nests_the_id():
+    assert folk_client.filter_params({"groups": {"not_in": "grp_42"}}) == {
+        "filter[groups][not_in][id]": "grp_42"}
+
+
+def test_no_filters_no_params():
+    assert folk_client.filter_params({}) == {} and folk_client.filter_params(None) == {}
+
+
+def test_list_people_by_group_hits_the_right_query(monkeypatch):
+    seen = {}
+
+    def fake_request(method, url, headers=None, **kwargs):
+        seen["params"] = kwargs.get("params")
+        return _Resp({"data": {"items": [{"id": "p1"}], "pagination": {}}})
+
+    monkeypatch.setattr(folk_client.requests, "request", fake_request)
+    c = FolkClient(api_key="k", field_filter=_Stub())
+    assert c.list_people(groups="grp_42") == [{"id": "p1"}]
+    assert seen["params"]["filter[groups][in][id]"] == "grp_42"

@@ -10,6 +10,41 @@ from ...config import require_secret
 from ..common import FieldFilter, raise_for_upstream
 
 
+# Champs de RELATION : Folk n'y accepte pas les opérateurs texte (`like` → 422
+# unrecognized_keys), mais `in`/`not_in`, et leur valeur est un OBJET qui porte
+# l'id : `filter[groups][in][id]=grp_…` (vérifié live le 2026-08-03, doc
+# developer.folk.app §list-people). Tant que le client enveloppait TOUT filtre en
+# `[like]`, lister les membres d'un groupe était impossible (signal #260).
+RELATION_FIELDS = frozenset({"groups", "companies"})
+RELATION_OPS = frozenset({"in", "not_in"})
+
+
+def filter_params(filters: Dict[str, Any]) -> Dict[str, Any]:
+    """Traduit `{champ: valeur}` en query params `filter[...]` de Folk.
+
+    - valeur simple sur un champ de relation → `filter[champ][in][id]`
+      (« appartient à ce groupe / cette société ») ;
+    - valeur simple sur un champ texte → `filter[champ][like]` (le défaut
+      historique : contient) ;
+    - valeur `{opérateur: valeur}` → l'opérateur demandé, tel quel
+      (`eq`, `not_eq`, `not_like`, `empty`, `not_empty`, `gt`, `in`, `not_in`)
+      — un appelant qui veut l'égalité stricte n'a plus à contourner le client.
+    """
+    params: Dict[str, Any] = {}
+    for key, val in (filters or {}).items():
+        if isinstance(val, dict):
+            for op, v in val.items():
+                if key in RELATION_FIELDS and op in RELATION_OPS:
+                    params[f"filter[{key}][{op}][id]"] = v
+                else:
+                    params[f"filter[{key}][{op}]"] = v
+        elif key in RELATION_FIELDS:
+            params[f"filter[{key}][in][id]"] = val
+        else:
+            params[f"filter[{key}][like]"] = val
+    return params
+
+
 class FolkClient:
     BASE_URL = "https://api.folk.app/v1"
 
@@ -65,10 +100,7 @@ class FolkClient:
     # --- People ---
 
     def list_people(self, **filters) -> List[Dict]:
-        params = {}
-        for key, val in filters.items():
-            params[f"filter[{key}][like]"] = val
-        return self._paginate("people", params)
+        return self._paginate("people", filter_params(filters))
 
     def get_person(self, person_id: str) -> Dict:
         return self._request("GET", f"people/{person_id}").get("data", {})
@@ -113,10 +145,7 @@ class FolkClient:
     # --- Companies ---
 
     def list_companies(self, **filters) -> List[Dict]:
-        params = {}
-        for key, val in filters.items():
-            params[f"filter[{key}][like]"] = val
-        return self._paginate("companies", params)
+        return self._paginate("companies", filter_params(filters))
 
     def get_company(self, company_id: str) -> Dict:
         return self._request("GET", f"companies/{company_id}").get("data", {})
@@ -140,10 +169,7 @@ class FolkClient:
     # --- Deals (objects in groups) ---
 
     def list_deals(self, group_id: str, object_type: str = "deals", **filters) -> List[Dict]:
-        params = {}
-        for key, val in filters.items():
-            params[f"filter[{key}][like]"] = val
-        return self._paginate(f"groups/{group_id}/{object_type}", params)
+        return self._paginate(f"groups/{group_id}/{object_type}", filter_params(filters))
 
     def get_deal(self, group_id: str, deal_id: str, object_type: str = "deals") -> Dict:
         return self._request(
