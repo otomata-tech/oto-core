@@ -18,6 +18,21 @@ from ..common import FieldFilter, raise_for_upstream
 RELATION_FIELDS = frozenset({"groups", "companies"})
 RELATION_OPS = frozenset({"in", "not_in"})
 
+# Valeurs valides de `subscribedEvents[].eventType` pour les webhooks (doc
+# developer.folk.app/api-reference/webhooks/create-a-webhook, 2026-08-04).
+# `object.*` couvre les deals ET tout autre object_type custom (pas de variante
+# par object_type — le scoping se fait via `filter.objectType`).
+WEBHOOK_EVENT_TYPES = frozenset({
+    "person.created", "person.updated", "person.deleted",
+    "person.groups_updated", "person.workspace_interaction_metadata_updated",
+    "company.created", "company.updated", "company.deleted",
+    "company.groups_updated",
+    "object.created", "object.updated", "object.deleted",
+    "note.created", "note.updated", "note.deleted",
+    "reminder.created", "reminder.updated", "reminder.deleted",
+    "reminder.triggered",
+})
+
 
 def filter_params(filters: Dict[str, Any]) -> Dict[str, Any]:
     """Traduit `{champ: valeur}` en query params `filter[...]` de Folk.
@@ -276,3 +291,25 @@ class FolkClient:
         if user_id == "me":
             return self.get_current_user()
         return self._request("GET", f"users/{user_id}").get("data", {})
+
+    # --- Webhooks ---
+
+    def list_webhooks(self) -> List[Dict]:
+        return self._paginate("webhooks")
+
+    def get_webhook(self, webhook_id: str) -> Dict:
+        return self._request("GET", f"webhooks/{webhook_id}").get("data", {})
+
+    def create_webhook(self, name: str, target_url: str,
+                       subscribed_events: List[Dict]) -> Dict:
+        return self._request("POST", "webhooks", json={
+            "name": name,
+            "targetUrl": target_url,
+            "subscribedEvents": subscribed_events,
+        }).get("data", {})
+
+    def update_webhook(self, webhook_id: str, **fields) -> Dict:
+        return self._request("PATCH", f"webhooks/{webhook_id}", json=fields).get("data", {})
+
+    def delete_webhook(self, webhook_id: str) -> Dict:
+        return self._request("DELETE", f"webhooks/{webhook_id}")

@@ -191,3 +191,49 @@ def test_list_people_by_group_hits_the_right_query(monkeypatch):
     c = FolkClient(api_key="k", field_filter=_Stub())
     assert c.list_people(groups="grp_42") == [{"id": "p1"}]
     assert seen["params"]["filter[groups][in][id]"] == "grp_42"
+
+
+# --- Webhooks --------------------------------------------------------------
+
+def test_list_webhooks(c, calls):
+    c.list_webhooks()
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/webhooks"
+
+
+def test_get_webhook(c, calls):
+    c.get_webhook("wbk_1")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/webhooks/wbk_1"
+
+
+def test_create_webhook(c, calls):
+    events = [{"eventType": "person.created", "filter": {"groupId": "grp_1"}}]
+    c.create_webhook("My app", "https://example.com/hook", events)
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/webhooks"
+    assert calls[-1]["json"] == {
+        "name": "My app",
+        "targetUrl": "https://example.com/hook",
+        "subscribedEvents": events,
+    }
+
+
+def test_update_webhook(c, calls):
+    c.update_webhook("wbk_1", status="inactive")
+    assert calls[-1]["method"] == "PATCH"
+    assert calls[-1]["url"] == f"{BASE}/webhooks/wbk_1"
+    assert calls[-1]["json"] == {"status": "inactive"}
+
+
+def test_delete_webhook(c, calls):
+    c.delete_webhook("wbk_1")
+    assert calls[-1]["method"] == "DELETE"
+    assert calls[-1]["url"] == f"{BASE}/webhooks/wbk_1"
+
+
+def test_webhook_event_types_are_the_documented_set():
+    assert folk_client.WEBHOOK_EVENT_TYPES >= {
+        "person.created", "company.updated", "object.deleted", "reminder.triggered",
+    }
+    assert "deal.created" not in folk_client.WEBHOOK_EVENT_TYPES  # deals = object.*
