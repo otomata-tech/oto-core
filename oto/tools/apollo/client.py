@@ -237,8 +237,23 @@ class ApolloClient:
 
         return self._request("POST", "mixed_people/api_search", json=data)
 
+    @staticmethod
+    def _looks_like_stub(person: Optional[Dict[str, Any]]) -> bool:
+        """La fiche rendue est-elle un STUB créé faute de match ?
+
+        Sur un identifiant trop faible, Apollo ne renvoie pas « rien » : il CRÉE une
+        personne neuve, vide (`last_name`/`title`/`email`/`linkedin_url` à null) et la
+        marque `revealed_for_current_team` — le crédit est consommé, la donnée n'existe
+        pas. Sans ce test, l'appelant croit avoir enrichi.
+        """
+        if not isinstance(person, dict):
+            return False
+        return not any(person.get(k) for k in
+                       ("last_name", "title", "email", "linkedin_url", "organization_id"))
+
     def match_person(
         self,
+        person_id: str = None,
         linkedin_url: str = None,
         email: str = None,
         first_name: str = None,
@@ -248,9 +263,11 @@ class ApolloClient:
         org_name: str = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Match a specific person.
+        Match a specific person (enrichment — 1 crédit Apollo par appel).
 
         Args:
+            person_id: **id Apollo** de la personne (celui que rend `search_people`)
+                — l'identifiant le plus sûr, à préférer dès qu'on vient d'un search
             linkedin_url: LinkedIn profile URL
             email: Email address
             first_name: First name
@@ -260,9 +277,28 @@ class ApolloClient:
             org_name: Organization name
 
         Returns:
-            Matched person data or None
+            Matched person data, ou None (404). La fiche porte `_stub: True` quand
+            Apollo a fabriqué une coquille vide au lieu de matcher (cf. `_looks_like_stub`).
+
+        ⚠️ **Un identifiant faible coûte un crédit pour rien.** `search_people` rend les
+        noms de famille OBFUSQUÉS (« Vi***l ») : matcher avec `first_name` + société
+        seuls ne retrouve pas la personne, Apollo crée un stub et facture quand même
+        (~12 crédits perdus en une session, feedbacks #347-350). D'où la garde
+        ci-dessous : sans identifiant fort (`person_id`/`email`/`linkedin_url`), un nom
+        COMPLET est exigé — l'appel est refusé AVANT de brûler le crédit.
         """
+        strong = person_id or email or linkedin_url
+        full_name = bool(last_name) or bool(name and len(name.split()) >= 2)
+        if not strong and not full_name:
+            raise ValueError(
+                "identifiant trop faible pour un match Apollo : passe `person_id` "
+                "(l'id rendu par search_people), `email` ou `linkedin_url` — sinon un "
+                "nom COMPLET (prénom + nom). Un prénom + une société ne matchent pas : "
+                "Apollo crée une fiche vide et consomme quand même le crédit.")
+
         data = {}
+        if person_id:
+            data["id"] = person_id
         if linkedin_url:
             data["linkedin_url"] = linkedin_url
         if email:
@@ -274,16 +310,23 @@ class ApolloClient:
         if name:
             data["name"] = name
         if domain:
-            data["organization_domain"] = domain
+            # `domain` est le nom attendu par l'API — `organization_domain` (utilisé
+            # jusqu'au 2026-08-04) est un champ INCONNU, donc ignoré en silence : le
+            # domaine ne participait pas au match, ce qui rendait les stubs plus probables.
+            data["domain"] = domain
         if org_name:
             data["organization_name"] = org_name
 
         try:
-            return self._request("POST", "people/match", json=data)
+            out = self._request("POST", "people/match", json=data)
         except ApolloError as e:
             if e.status_code == 404:
                 return None
             raise
+        person = (out or {}).get("person") if isinstance(out, dict) else None
+        if self._looks_like_stub(person):
+            person["_stub"] = True
+        return out
 
     def get_job_postings(self, org_id: str) -> Dict[str, Any]:
         """
