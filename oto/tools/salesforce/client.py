@@ -269,6 +269,52 @@ class SalesforceClient:
         return self._request(
             "PATCH", f"sobjects/{sobject}/{external_id_field}/{external_id}", json=data)
 
+    # --- sObject Collections (bulk create/update, ONE sObject type per call) ---
+    #
+    # Three Salesforce mechanisms cover "many records" and they aren't
+    # interchangeable: Bulk API 2.0 is a fully ASYNC job/upload/poll lifecycle
+    # meant for 2000+ records (wrong shape for a synchronous tool call); Composite
+    # Batch runs up to 25 arbitrary, independent sub-requests (built for
+    # heterogeneous multi-step sequences, not bulk of one type). Collections is
+    # the one that fits here: synchronous, ONE HTTP call, up to 200 records of
+    # the SAME sObject type (confirmed against Salesforce's REST API guide).
+
+    MAX_COLLECTION_RECORDS = 200
+
+    def _collection_records(self, sobject: str, items: list[dict]) -> list[dict]:
+        if len(items) > self.MAX_COLLECTION_RECORDS:
+            raise ValueError(
+                f"{len(items)} records — sObject Collections caps at "
+                f"{self.MAX_COLLECTION_RECORDS} per call.")
+        return [{"attributes": {"type": sobject}, **item} for item in items]
+
+    def create_records(self, sobject: str, items: list[dict],
+                        all_or_none: bool = False) -> list[dict]:
+        """Bulk-create up to 200 records of the SAME sObject type in ONE call.
+
+        Returns a list of `{id, success, errors}`, in the SAME ORDER as
+        `items`. ⚠️ A 200 HTTP response can still carry PER-RECORD failures
+        when `all_or_none` is false (the Salesforce default, kept as our
+        default too) — unlike `create_record`, a raised exception here only
+        means the whole request failed, not that every record did. Always
+        inspect each entry.
+        """
+        return self._request("POST", "composite/sobjects", json={
+            "allOrNone": all_or_none,
+            "records": self._collection_records(sobject, items),
+        })
+
+    def update_records(self, sobject: str, items: list[dict],
+                        all_or_none: bool = False) -> list[dict]:
+        """Bulk-update up to 200 records of the SAME sObject type in ONE call
+        — each item MUST carry its own `Id` (the record to update) alongside
+        the fields to change. Same per-record `{id, success, errors}` contract
+        as `create_records`."""
+        return self._request("PATCH", "composite/sobjects", json={
+            "allOrNone": all_or_none,
+            "records": self._collection_records(sobject, items),
+        })
+
     # --- SOQL / SOSL ---
 
     def query(self, soql: str) -> dict:
