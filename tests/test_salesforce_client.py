@@ -125,6 +125,65 @@ def test_update_and_delete_synthesize_success_on_204(c, monkeypatch):
     assert c.delete_record("Contact", "003xx") == {"id": "003xx", "success": True}
 
 
+# --- sObject Collections (bulk create/update) -------------------------------
+
+def test_create_records_batches_into_one_collections_call(c, monkeypatch):
+    monkeypatch.setattr(sf_client.requests, "post", lambda *a, **k: _Resp(
+        {"access_token": "tok123", "instance_url": INSTANCE}, status_code=200))
+    captured = []
+
+    def fake_request(method, url, headers=None, **kwargs):
+        captured.append({"method": method, "url": url, "json": kwargs.get("json")})
+        return _Resp([{"id": "003a", "success": True, "errors": []},
+                      {"id": "003b", "success": True, "errors": []}])
+
+    monkeypatch.setattr(sf_client.requests, "request", fake_request)
+
+    out = c.create_records("Contact", [{"LastName": "A"}, {"LastName": "B"}])
+    assert len(captured) == 1                     # ONE HTTP call for both records
+    assert captured[0]["method"] == "POST"
+    assert captured[0]["url"] == f"{INSTANCE}/services/data/v60.0/composite/sobjects"
+    body = captured[0]["json"]
+    assert body["allOrNone"] is False              # Salesforce's own default, kept
+    assert body["records"] == [
+        {"attributes": {"type": "Contact"}, "LastName": "A"},
+        {"attributes": {"type": "Contact"}, "LastName": "B"},
+    ]
+    assert out == [{"id": "003a", "success": True, "errors": []},
+                   {"id": "003b", "success": True, "errors": []}]
+
+
+def test_update_records_keeps_the_callers_id_field(c, monkeypatch):
+    monkeypatch.setattr(sf_client.requests, "post", lambda *a, **k: _Resp(
+        {"access_token": "tok123", "instance_url": INSTANCE}, status_code=200))
+    captured = []
+
+    def fake_request(method, url, headers=None, **kwargs):
+        captured.append({"method": method, "json": kwargs.get("json")})
+        return _Resp([{"id": "003a", "success": True, "errors": []}])
+
+    monkeypatch.setattr(sf_client.requests, "request", fake_request)
+
+    c.update_records("Contact", [{"Id": "003a", "LastName": "X"}], all_or_none=True)
+    assert captured[0]["method"] == "PATCH"
+    assert captured[0]["json"] == {
+        "allOrNone": True,
+        "records": [{"attributes": {"type": "Contact"}, "Id": "003a", "LastName": "X"}],
+    }
+
+
+def test_collections_reject_over_200_records_without_a_network_call(c, monkeypatch):
+    # Fails fast on the hard Salesforce cap — never even tries to refresh the
+    # token or make an HTTP call for a request that would 400 anyway.
+    monkeypatch.setattr(sf_client.requests, "post",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no auth call expected")))
+    monkeypatch.setattr(sf_client.requests, "request",
+                        lambda *a, **k: (_ for _ in ()).throw(AssertionError("no HTTP call expected")))
+
+    with pytest.raises(ValueError, match="200"):
+        c.create_records("Contact", [{"LastName": str(i)} for i in range(201)])
+
+
 # --- Notes (Enhanced Notes: ContentNote + ContentDocumentLink) -------------
 
 def test_list_notes_escapes_quotes_in_parent_id(c, monkeypatch):
