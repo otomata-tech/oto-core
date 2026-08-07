@@ -42,7 +42,11 @@ class ZohoAnalyticsClient:
         # flux de consentement, pas collé. Son absence est signalée au moment
         # du refresh (message actionnable) plutôt que par une erreur de config.
         self.refresh_token = refresh_token or get_secret("ZOHO_ANALYTICS_REFRESH_TOKEN", None)
-        self.org_id = org_id or require_secret("ZOHO_ANALYTICS_ORG_ID")
+        # FACULTATIF à la construction, comme `refresh_token` et pour la même raison :
+        # en mode server-based, l'organisation n'est connue qu'APRÈS le consentement —
+        # c'est `list_orgs()` qui la découvre. Son absence est signalée au moment du
+        # premier appel qui en a besoin (message actionnable), pas à la construction.
+        self.org_id = org_id or get_secret("ZOHO_ANALYTICS_ORG_ID", None)
         self.api_domain = api_domain or get_secret(
             "ZOHO_ANALYTICS_API_DOMAIN", "https://analyticsapi.zoho.com")
         self.accounts_url = accounts_url or get_secret(
@@ -65,24 +69,36 @@ class ZohoAnalyticsClient:
 
     # --- HTTP ---
 
-    def _headers(self) -> dict:
-        return {
-            "Authorization": f"Zoho-oauthtoken {self._get_access_token()}",
-            "ZANALYTICS-ORGID": self.org_id,
-        }
+    def _auth_headers(self) -> dict:
+        """Authentification seule. Un seul endpoint s'en contente — `list_orgs`, qui
+        sert justement à découvrir l'organisation qu'on ne connaît pas encore."""
+        return {"Authorization": f"Zoho-oauthtoken {self._get_access_token()}"}
 
-    def _request(self, method: str, url: str, *, parse_json: bool = True, **kwargs) -> Any:
+    def _headers(self) -> dict:
+        if not self.org_id:
+            raise ValueError(
+                "Org ID Zoho Analytics manquant : chaque requête porte l'en-tête "
+                "ZANALYTICS-ORGID. Découvre les organisations du compte avec "
+                "`list_orgs()`, puis renseigne celle qui porte tes workspaces.")
+        return {**self._auth_headers(), "ZANALYTICS-ORGID": self.org_id}
+
+    def _request(self, method: str, url: str, *, parse_json: bool = True,
+                 with_org: bool = True, **kwargs) -> Any:
         """Requête authentifiée avec refresh du token sur 401 et backoff sur 429.
 
         `url` est absolu (les endpoints Analytics mélangent `/restapi/v2/…` et
-        des URL de download déjà pleines renvoyées par l'API)."""
-        headers = self._headers()
+        des URL de download déjà pleines renvoyées par l'API).
+
+        `with_org=False` omet l'en-tête d'organisation — réservé à `list_orgs`, seul
+        endpoint qui répond sans savoir dans quelle organisation chercher."""
+        build = self._headers if with_org else self._auth_headers
+        headers = build()
         for attempt in range(3):
             resp = requests.request(method, url, headers=headers, **kwargs)
 
             if resp.status_code == 401 and attempt == 0:
                 self._invalidate_token()
-                headers = self._headers()
+                headers = build()
                 continue
             if resp.status_code == 429:
                 time.sleep(int(resp.headers.get("Retry-After", 2)))
@@ -102,6 +118,24 @@ class ZohoAnalyticsClient:
         return f"{self.api_domain}/restapi/v2/{endpoint}"
 
     # --- Métadonnées ---
+
+    def list_orgs(self) -> list[dict]:
+        """Organisations Analytics visibles par ce compte : `{org_id, name, role}`.
+
+        Le SEUL endpoint qui ne réclame pas `ZANALYTICS-ORGID` — d'où son intérêt :
+        après un consentement OAuth, il permet de renseigner l'organisation au lieu
+        d'envoyer l'utilisateur chercher un identifiant à onze chiffres dans
+        l'interface Zoho.
+
+        ⚠️ **Un compte en voit souvent PLUSIEURS** (workspaces partagés), et la
+        réponse ne désigne aucune organisation par défaut. Au-delà d'une seule, c'est
+        donc un CHOIX à faire faire — pas à deviner : sur le premier compte réel
+        testé, deux organisations remontaient, et prendre « la première » aurait
+        désigné la mauvaise."""
+        payload = self._request("GET", self._v2("orgs"), with_org=False)
+        orgs = (payload or {}).get("data", {}).get("orgs") or []
+        return [{"org_id": str(o.get("orgId")), "name": o.get("orgName"),
+                 "role": o.get("role")} for o in orgs if o.get("orgId")]
 
     def list_workspaces(self) -> dict:
         """List all workspaces accessible to the user (owned + shared)."""
