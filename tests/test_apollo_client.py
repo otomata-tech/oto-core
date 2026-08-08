@@ -87,6 +87,39 @@ def test_domain_uses_the_name_the_api_knows():
         patcher.stop()
 
 
+def test_people_search_sends_the_location_filters_apollo_knows():
+    """Isoler la filiale FRANÇAISE d'un domaine mondial (signaux #354/#356).
+
+    Un domaine est partagé par tout le groupe — verifone.com rend 3282 profils tous
+    pays confondus — et rien d'autre ne permet d'en garder les Français : chaque
+    reveal à l'aveugle coûte un crédit. Apollo accepte `person_locations` et
+    `organization_locations` sur `mixed_people/api_search` ; ils manquaient au
+    wrapper. On vérifie le PAYLOAD, pas la réponse : une API permissive ignore un
+    champ inconnu en silence, donc un mauvais nom ne lèverait jamais d'erreur."""
+    client, calls, patcher = _client_and_calls({"people": []})
+    try:
+        client.search_people(domains=["verifone.com"], person_locations=["France"],
+                             organization_locations=["Paris, France"])
+        sent = calls[0]["json"]
+        assert sent["person_locations"] == ["France"]
+        assert sent["organization_locations"] == ["Paris, France"]
+        assert sent["q_organization_domains_list"] == ["verifone.com"]
+        assert "mixed_people/api_search" in calls[0]["url"]
+    finally:
+        patcher.stop()
+
+
+def test_people_search_omits_location_filters_when_unused():
+    """Un filtre non demandé ne part pas : un tableau vide n'est pas « partout »."""
+    client, calls, patcher = _client_and_calls({"people": []})
+    try:
+        client.search_people(domains=["acme.com"])
+        assert "person_locations" not in calls[0]["json"]
+        assert "organization_locations" not in calls[0]["json"]
+    finally:
+        patcher.stop()
+
+
 def test_empty_record_is_flagged_as_a_stub():
     """Apollo répond par une fiche NEUVE et vide plutôt que par « pas de match » —
     et facture. L'appelant doit pouvoir distinguer ça d'un enrichissement."""

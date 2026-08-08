@@ -203,6 +203,8 @@ class ApolloClient:
         org_ids: List[str] = None,
         titles: List[str] = None,
         seniorities: List[str] = None,
+        person_locations: List[str] = None,
+        organization_locations: List[str] = None,
         per_page: int = 25,
         page: int = 1,
     ) -> Dict[str, Any]:
@@ -214,6 +216,8 @@ class ApolloClient:
             org_ids: Apollo organization IDs
             titles: Title keywords
             seniorities: Seniority levels (e.g., ["c_suite", "director"])
+            person_locations: Where the PERSON is, e.g. ["France", "Paris, France"]
+            organization_locations: Where their EMPLOYER's site is
             per_page: Results per page
             page: Page number
 
@@ -224,6 +228,11 @@ class ApolloClient:
         s'appelle `q_organization_domains_list` : `people/search` +
         `organization_domains` rendaient un 422 systématique. Il n'existe PAS de
         filtre « department » sur cette API — cibler par `titles`/`seniorities`.
+
+        La LOCALISATION est ce qui rend le domaine exploitable sur un groupe
+        mondial : `franke.com` rend 1887 profils, `verifone.com` 3282, tous pays
+        confondus, et rien d'autre ne permet d'en isoler la filiale française —
+        chaque reveal à l'aveugle coûtant un crédit.
         """
         data = {"per_page": per_page, "page": page}
         if domains:
@@ -234,6 +243,10 @@ class ApolloClient:
             data["person_titles"] = titles
         if seniorities:
             data["person_seniorities"] = seniorities
+        if person_locations:
+            data["person_locations"] = person_locations
+        if organization_locations:
+            data["organization_locations"] = organization_locations
 
         return self._request("POST", "mixed_people/api_search", json=data)
 
