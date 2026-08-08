@@ -93,19 +93,31 @@ class GmailClient:
             userId='me', id=message_id, format='full',
         ).execute()
 
-        headers = {h['name']: h['value'] for h in msg.get('payload', {}).get('headers', [])}
+        # Lookup case-insensitive (cf. `reply`) : l'API rend les noms d'en-tête TELS
+        # QU'ÉCRITS par l'émetteur. Un `To:`/`Cc:`/`Subject:` cherché à la lettre près
+        # revenait vide sur tout message écrit en minuscules — dont les nôtres avant
+        # ce correctif : relire un brouillon ne montrait ni destinataire ni copie,
+        # donc impossible de le vérifier avant envoi (signal #342). Vaut aussi pour
+        # l'existant, que la capitalisation à l'écriture ne rattrape pas.
+        headers = {h['name'].lower(): h['value'] for h in msg.get('payload', {}).get('headers', [])}
         body = self._extract_body(msg.get('payload', {}))
         attachments = self._list_attachments(msg.get('payload', {}))
 
         result = {
             'id': msg['id'],
             'threadId': msg['threadId'],
-            'subject': headers.get('Subject', ''),
-            'from': headers.get('From', ''),
-            'to': headers.get('To', ''),
-            'cc': headers.get('Cc', ''),
-            'date': headers.get('Date', ''),
+            'subject': headers.get('subject', ''),
+            'from': headers.get('from', ''),
+            'to': headers.get('to', ''),
+            'cc': headers.get('cc', ''),
+            'date': headers.get('date', ''),
             'body': body,
+            # `body` est le text/plain — donc le markdown SOURCE quand le message
+            # porte aussi une partie HTML. Sans ce drapeau, relire un mail bien rendu
+            # donne à voir des `**gras**` et fait conclure « le rendu est cassé »
+            # (signal #341). Booléen plutôt que le HTML lui-même : lever le doute
+            # sans verser une page de balises dans le contexte de l'agent.
+            'has_html': self._find_part(msg.get('payload', {}).get('parts', []), 'text/html') is not None,
             'labelIds': msg.get('labelIds', []),
         }
         if attachments:
@@ -270,8 +282,18 @@ class GmailClient:
         attachments: Optional[list[str]] = None,
         thread_id: Optional[str] = None,
         in_reply_to: Optional[str] = None,
+        markdown: bool = True,
     ) -> dict:
-        """Create a draft email. Pass thread_id + in_reply_to for threaded replies."""
+        """Create a draft email. Pass thread_id + in_reply_to for threaded replies.
+
+        If `html` is not provided and `markdown=True` (default), the body is
+        rendered from markdown to an HTML fragment — **même contrat que `send` et
+        `reply`**, qui le faisaient déjà. Seul le brouillon ne le faisait pas : un
+        agent composant en markdown obtenait un corps texte où `**gras**` et les
+        puces restaient littéraux, visibles tels quels du destinataire (#341/#343).
+        """
+        if html is None and markdown:
+            html = _markdown_to_html_fragment(body)
         message = self._build_message(to, subject, body, html, cc, bcc, attachments)
         if in_reply_to:
             message['In-Reply-To'] = in_reply_to
@@ -361,6 +383,10 @@ class GmailClient:
             to=reply_to, subject=subject, body=body, html=html,
             cc=cc, attachments=attachments,
             thread_id=thread_id, in_reply_to=orig_msg_id or None,
+            # Le rendu a déjà eu lieu ci-dessus : `markdown` est propagé pour qu'un
+            # appel `markdown=False` ne se fasse pas re-rendre par le défaut de
+            # `create_draft` (html reste None dans ce cas — c'est voulu).
+            markdown=markdown,
         )
 
     def _build_message(self, to, subject, body, html=None, cc=None, bcc=None, attachments=None, from_name=None):
@@ -385,12 +411,18 @@ class GmailClient:
         else:
             message = MIMEText(body)
 
-        message['to'] = to
-        message['subject'] = subject
+        # En-têtes en forme CANONIQUE (RFC 5322) : l'API Gmail rend les noms TELS
+        # QU'ÉCRITS — un `cc:` minuscule reste `cc` dans `payload.headers`, quand
+        # ceux que Gmail pose lui-même arrivent capitalisés (`From`, `Date`). Tout
+        # lecteur qui cherche `Cc` (le nôtre compris, cf. `get_message`) voyait donc
+        # nos propres messages sans destinataire ni copie — d'où le diagnostic
+        # « le cc n'est pas appliqué » alors qu'il l'était (signaux #340/#342).
+        message['To'] = to
+        message['Subject'] = subject
         if cc:
-            message['cc'] = cc
+            message['Cc'] = cc
         if bcc:
-            message['bcc'] = bcc
+            message['Bcc'] = bcc
         if from_name:
             profile = self.service.users().getProfile(userId='me').execute()
             message['From'] = f'{from_name} <{profile["emailAddress"]}>'

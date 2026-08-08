@@ -86,6 +86,24 @@ class SireneStock:
     # --- normalisation --------------------------------------------------------
 
     @staticmethod
+    def _coord(value: Any) -> Optional[float]:
+        """Coordonnée Lambert, ou None quand l'INSEE ne la diffuse pas.
+
+        Le stock porte des SENTINELLES textuelles, pas seulement des nombres :
+        un établissement non diffusible sort `[ND]` dans les colonnes de
+        géolocalisation. Un `float()` nu plantait alors le scan ENTIER — un
+        `--all` sur un NAF (~10 000 établissements) mourait sur la première
+        ligne non diffusible (signal #358). Une coordonnée absente est une
+        donnée manquante ordinaire : le reste de la fiche (adresse, NAF,
+        effectifs) est valide et doit sortir."""
+        if value is None or value == "":
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None      # `[ND]` et toute autre sentinelle future
+
+    @staticmethod
     def _normalize(etab: dict) -> dict:
         """Normalise un dict établissement (snake_case INSEE) → forme stable
         pour les consommateurs historiques (street, postal_code, city, status…).
@@ -111,9 +129,10 @@ class SireneStock:
             "tranche_effectifs": etab.get("tranche_effectifs"),
             "date_creation": etab.get("date_creation"),
         }
-        if etab.get("lambert_x") is not None:
-            out["lambert_x"] = float(etab["lambert_x"])
-            out["lambert_y"] = float(etab["lambert_y"]) if etab.get("lambert_y") is not None else None
+        x = SireneStock._coord(etab.get("lambert_x"))
+        if x is not None:
+            out["lambert_x"] = x
+            out["lambert_y"] = SireneStock._coord(etab.get("lambert_y"))
         return out
 
     # --- high-level (legacy API preservée) -----------------------------------
