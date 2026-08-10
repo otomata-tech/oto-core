@@ -25,6 +25,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class BrightDataClient:
     """Client Bright Data (scaffold). Auth Bearer + endpoint `/request` posés ;
@@ -49,7 +51,7 @@ class BrightDataClient:
     def _post(self, payload: Dict[str, Any]) -> requests.Response:
         """POST sur l'endpoint unifié `/request`. Helper bas-niveau prêt pour les
         futures méthodes produit (SERP / Web Unlocker)."""
-        response = self.session.post(self.BASE_URL, json=payload)
+        response = self.session.post(self.BASE_URL, json=payload, timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         return response
 

@@ -18,6 +18,8 @@ import requests
 from ...config import require_secret
 from ..common import raise_for_upstream
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 @dataclass
 class Campaign:
@@ -481,7 +483,7 @@ class LemlistClient:
             f"{self.BASE_URL}/campaigns/{campaign_id}/export",
             headers={"Authorization": self._get_auth_header()},
             params=params
-        )
+        , timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         return response.text
 

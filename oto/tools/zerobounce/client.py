@@ -10,6 +10,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class ZeroBounceClient:
     """
@@ -36,7 +38,7 @@ class ZeroBounceClient:
         params = params or {}
         params["api_key"] = self.api_key
 
-        response = requests.get(url, params=params)
+        response = requests.get(url, params=params, timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         return response.json()
 
@@ -88,6 +90,6 @@ class ZeroBounceClient:
             "email_batch": [{"email_address": e} for e in emails]
         }
 
-        response = requests.post(url, json=data)
+        response = requests.post(url, json=data, timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         return response.json().get("email_batch", [])

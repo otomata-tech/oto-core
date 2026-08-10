@@ -10,6 +10,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class HunterError(RuntimeError):
     """Erreur API Hunter — message amont (`errors[].details`) remonté tel quel.
@@ -72,7 +74,7 @@ class HunterClient:
 
         response = requests.get(
             url, params=params or {},
-            headers={"Authorization": f"Bearer {self.api_key}"})
+            headers={"Authorization": f"Bearer {self.api_key}"}, timeout=_HTTP_TIMEOUT)
         if not response.ok:
             detail = self._upstream_message(response)
             if response.status_code == 429:

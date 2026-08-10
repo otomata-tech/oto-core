@@ -10,6 +10,8 @@ import requests
 from ...config import require_secret, get_secret
 from ..common import raise_for_upstream
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class SalesforceAuthError(ValueError):
     """Refus OAuth Salesforce (invalid_client / invalid_grant…).
@@ -120,6 +122,7 @@ class SalesforceClient:
                 "client_secret": self.client_secret,
                 "refresh_token": self.refresh_token,
             },
+            timeout=_HTTP_TIMEOUT,
         )
         # Salesforce suit l'OAuth2 standard (RFC 6749 §5.2) : un refus auth
         # (invalid_grant/invalid_client) renvoie HTTP 400 avec l'erreur dans le

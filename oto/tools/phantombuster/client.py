@@ -11,6 +11,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class PhantombusterClient:
     """
@@ -104,7 +106,7 @@ class PhantombusterClient:
         data = self.get_container(container_id)
         result_url = data.get("resultUrl")
         if result_url:
-            response = requests.get(result_url)
+            response = requests.get(result_url, timeout=_HTTP_TIMEOUT)
             response.raise_for_status()
             return response.json()
         return None
@@ -122,7 +124,7 @@ class PhantombusterClient:
         data = self.get_container(container_id)
         output_url = data.get("outputUrl")
         if output_url:
-            response = requests.get(output_url)
+            response = requests.get(output_url, timeout=_HTTP_TIMEOUT)
             response.raise_for_status()
             return response.text
         return ""

@@ -13,10 +13,13 @@ Requires: requests
 import math
 import time
 from typing import Optional, Dict, Any, List
+from urllib.parse import urlparse
 
 import requests
 
 from ...config import require_secret
+
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
 
 
 class SerperClient:
@@ -68,7 +71,7 @@ class SerperClient:
         qu'un opaque "400 Bad Request" (Serper renvoie 400 + {"message":...}
         pour "Not enough credits", clé invalide, etc.)."""
         self._rate_limit()
-        response = self.session.post(url, json=json_data)
+        response = self.session.post(url, json=json_data, timeout=_HTTP_TIMEOUT)
         if response.status_code >= 400:
             try:
                 msg = response.json().get("message") or response.text
@@ -627,6 +630,38 @@ class SerperClient:
 
     # --------------------------------------------------------------- scrape
 
+    # Hôtes qui refusent SYSTÉMATIQUEMENT un scrape serveur (mur de connexion ou
+    # anti-bot permanent). Y envoyer Serper coûte ~45 s — son propre timeout — pour
+    # revenir bredouille à tous les coups : mesuré sur 4 jours de journal, six échecs
+    # à 45-48 s dont quatre sur des profils LinkedIn. Mieux vaut refuser tout de suite
+    # en nommant l'outil qui, lui, sait lire la source.
+    #
+    # La liste reste COURTE et ne contient que des refus structurels. Un site qui
+    # bloque parfois n'a rien à y faire : ce garde supprime une attente inutile, il ne
+    # doit pas devenir une liste noire qui prive d'un scrape qui aurait marché.
+    _NEVER_SCRAPABLE = {
+        "linkedin.com": "les profils et pages LinkedIn se lisent avec les outils "
+                        "`unipile_*` (compte connecté), jamais par scrape.",
+        "instagram.com": "Instagram exige une session ; passe par le connecteur "
+                         "messagerie ou une autre source.",
+        "facebook.com": "Facebook exige une session ; cherche une autre source.",
+        "x.com": "X exige une session ; cherche une autre source.",
+        "twitter.com": "X exige une session ; cherche une autre source.",
+    }
+
+    @classmethod
+    def _refuses_scraping(cls, url: str) -> Optional[str]:
+        """La raison de refuser d'emblée, ou None. Compare sur le domaine
+        enregistrable pour couvrir les sous-domaines (`fr.`, `uk.`, `www.`)."""
+        try:
+            host = (urlparse(url).hostname or "").lower()
+        except ValueError:
+            return None
+        for domain, why in cls._NEVER_SCRAPABLE.items():
+            if host == domain or host.endswith("." + domain):
+                return why
+        return None
+
     def scrape_page(
         self,
         url: str,
@@ -641,7 +676,14 @@ class SerperClient:
 
         Returns:
             Page data with text, metadata, and JSON-LD
+
+        Raises:
+            RuntimeError: si l'hôte refuse structurellement le scrape serveur — le
+                message nomme la source à utiliser à la place.
         """
+        why = self._refuses_scraping(url)
+        if why:
+            raise RuntimeError(f"Serper scrape refusé pour {url} : {why}")
         payload: Dict[str, Any] = {"url": url}
         if include_markdown:
             payload["includeMarkdown"] = True

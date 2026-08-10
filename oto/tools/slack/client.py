@@ -12,6 +12,8 @@ import requests
 
 from ...config import require_secret, get_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 # Slack répond HTTP 200 avec `{"ok": false, "error": "<code>"}` pour les rejets
 # logiques (raise_for_status ne les voit pas). On les traduit en erreur amont
@@ -458,7 +460,7 @@ class SlackClient:
         voir `download_file`.
         """
         url, token, meta = self._file_source(file_id)
-        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"})
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, timeout=_HTTP_TIMEOUT)
         resp.raise_for_status()
         return {
             "data": resp.content,
@@ -473,7 +475,7 @@ class SlackClient:
         access), falling back to the bot token.
         """
         url, token, _ = self._file_source(file_id)
-        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, stream=True)
+        resp = requests.get(url, headers={"Authorization": f"Bearer {token}"}, stream=True, timeout=_HTTP_TIMEOUT)
         resp.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in resp.iter_content(chunk_size=8192):

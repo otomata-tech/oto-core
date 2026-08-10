@@ -11,6 +11,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class HitHorizonsClient:
     """
@@ -54,7 +56,7 @@ class HitHorizonsClient:
 
         url = f"{self.BASE_URL}/{self.country}/{endpoint}"
 
-        response = self.session.get(url, params=params)
+        response = self.session.get(url, params=params, timeout=_HTTP_TIMEOUT)
 
         if response.status_code == 429:
             if retry < 3:

@@ -11,6 +11,8 @@ import requests
 
 from ...config import get_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class UnsplashClient:
     """
@@ -54,7 +56,7 @@ class UnsplashClient:
         self._rate_limit()
 
         url = f"{self.BASE_URL}{endpoint}"
-        response = self.session.get(url, params=params)
+        response = self.session.get(url, params=params, timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         return response.json()
 
@@ -113,7 +115,7 @@ class UnsplashClient:
             height = 1080 if orientation == "landscape" else 1920 if orientation == "portrait" else 1600
 
             url = f"https://source.unsplash.com/random/{width}x{height}/?{query}"
-            response = self.session.get(url, allow_redirects=True)
+            response = self.session.get(url, allow_redirects=True, timeout=_HTTP_TIMEOUT)
             final_url = response.url
 
             photo_id = hashlib.md5(final_url.encode()).hexdigest()[:11]
@@ -190,7 +192,7 @@ class UnsplashClient:
         """
         self._rate_limit()
         try:
-            response = self.session.get(download_location)
+            response = self.session.get(download_location, timeout=_HTTP_TIMEOUT)
             response.raise_for_status()
             return response.json()
         except:

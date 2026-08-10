@@ -11,6 +11,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class SerpAPIClient:
     """
@@ -47,7 +49,7 @@ class SerpAPIClient:
         self._rate_limit()
         params["api_key"] = self.api_key
 
-        response = self.session.get(self.BASE_URL, params=params)
+        response = self.session.get(self.BASE_URL, params=params, timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         return response.json()
 
