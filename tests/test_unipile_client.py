@@ -89,6 +89,41 @@ def test_list_chats_custom_inbox_and_inboxes_path():
     assert rec[0][1] == "/acc/inboxes"
 
 
+# ---- découverte du compte LinkedIn (casse du provider en v2) ------------
+# v2 : un compte porte `provider:"linkedin"` (MINUSCULES) et plus aucun champ `type`
+# (champs relevés en live : application_id, created_at, id, is_locked, metadata, name,
+# object, provider, proxy, status, user_id). Le test historique `== "LINKEDIN"` ne
+# pouvait donc plus jamais être vrai → « aucun compte LinkedIn connecté » alors qu'un
+# compte opérationnel existait.
+
+def _accounts_client(accounts):
+    c = UnipileClient(api_key="k")          # pas d'account_id → découverte
+    c._request = lambda *a, **k: {"data": accounts}  # type: ignore[method-assign]
+    return c
+
+
+def test_account_id_discovers_lowercase_provider_v2():
+    c = _accounts_client([
+        {"id": "acc-wa", "provider": "whatsapp", "object": "Account"},
+        {"id": "acc-li", "provider": "linkedin", "object": "Account"},
+    ])
+    assert c.account_id() == "acc-li"
+
+
+def test_account_id_still_accepts_v1_uppercase_type():
+    c = _accounts_client([{"id": "acc-li", "type": "LINKEDIN"}])
+    assert c.account_id() == "acc-li"
+
+
+def test_account_id_error_lists_connected_providers():
+    # Le diagnostic ne doit pas MENTIR : il énumère ce qui est réellement connecté.
+    c = _accounts_client([{"id": "acc-wa", "provider": "whatsapp"},
+                          {"id": "acc-g", "provider": "google"}])
+    with pytest.raises(UnipileError) as e:
+        c.account_id()
+    assert "whatsapp" in str(e.value) and "google" in str(e.value)
+
+
 # ---- profils : garde anti-mismatch (#153) -------------------------------
 
 def test_get_profile_ok_when_identity_matches():

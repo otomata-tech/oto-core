@@ -240,3 +240,183 @@ def test_reshared_imbrique_dans_content_est_vu_aussi():
     el["content"] = {"resharedUpdate": {"actor": {"name": {"text": "Léa Bernard"}}}}
     item = parse_feed(_envelope([el]))["items"][0]
     assert item["is_repost"] is True and item["original_author_name"] == "Léa Bernard"
+
+
+# --- DE QUOI le post est fait (bloc `content`) -------------------------------
+# Le bloc `content` était intégralement jeté : un post à 2 775 réactions dont le texte
+# se réduit à « 🧐 » (tout le propos est dans l'image) était inclassable par un agent.
+# On garde le TYPE normalisé + l'intitulé gratuit, pas le bloc (~4 700 car., 93 % de
+# miniatures et de tracking).
+
+def test_post_texte_nu_est_type_text():
+    item = parse_feed(_envelope([_update()]))["items"][0]
+    assert item["content_type"] == "text"
+    assert item["content_title"] is None
+
+
+def test_post_image_sans_texte_reste_classable():
+    """Le cas qui motive le champ : 2 775 réactions, texte = un emoji, tout est en image."""
+    el = _update()
+    el["commentary"] = {"text": {"text": "🧐"}}
+    el["content"] = {"imageComponent": {"images": [{"attributes": [{"detailData": {}}]}]}}
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["content_type"] == "image"
+    assert item["text"] == "🧐"  # le texte brut n'est pas réécrit
+
+
+def test_image_avec_texte_alternatif_le_rend():
+    """Quand LinkedIn porte un alt text, c'est LE seul mot de ce post-là : on le rend
+    (déjà dans la charge utile — aucun appel supplémentaire)."""
+    el = _update()
+    el["commentary"] = {"text": {"text": "🧐"}}
+    el["content"] = {"imageComponent": {"images": [
+        {"accessibilityText": "Graphique : le CAC 40 des SDR", "attributes": []}]}}
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["content_type"] == "image"
+    assert item["content_title"] == "Graphique : le CAC 40 des SDR"
+
+
+def test_article_expose_son_titre():
+    el = _update()
+    el["content"] = {"articleComponent": {
+        "title": {"text": "Les 7 signaux d'un pipe qui ment"},
+        "subtitle": {"text": "5 min de lecture"},
+        "largeImage": {"attributes": []},
+    }}
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["content_type"] == "article"
+    assert item["content_title"] == "Les 7 signaux d'un pipe qui ment"
+
+
+def test_sondage_expose_sa_question():
+    el = _update()
+    el["content"] = {"pollComponent": {
+        "question": {"text": "Combien de RDV par semaine ?"},
+        "pollOptions": [{"option": {"text": "0-2"}}, {"option": {"text": "3+"}}],
+    }}
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["content_type"] == "poll"
+    assert item["content_title"] == "Combien de RDV par semaine ?"
+
+
+def test_document_titre_niveau_imbrique():
+    """Le titre d'un document vit un cran plus bas (`document.title`) — sondé aussi."""
+    el = _update()
+    el["content"] = {"documentComponent": {
+        "document": {"title": "Benchmark SDR 2026", "totalPageCount": 12}
+    }}
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["content_type"] == "document"
+    assert item["content_title"] == "Benchmark SDR 2026"
+
+
+def test_types_video_replies_sur_un_seul_nom():
+    """Vidéo native et vidéo externe = deux clés Voyager, un seul type pour l'agent."""
+    for key in ("linkedInVideoComponent", "externalVideoComponent"):
+        el = _update()
+        el["content"] = {key: {"videoPlayMetadata": {}}}
+        assert parse_feed(_envelope([el]))["items"][0]["content_type"] == "video"
+
+
+def test_diaporama_et_carrousel_sont_un_carousel():
+    for key in ("slideshowComponent", "carouselContent"):
+        el = _update()
+        el["content"] = {key: {"items": []}}
+        assert parse_feed(_envelope([el]))["items"][0]["content_type"] == "carousel"
+
+
+def test_composant_inconnu_rend_son_propre_nom():
+    """42 composants recensés, LinkedIn en ajoute : un type jamais vu est DÉRIVÉ de la
+    clé (jamais un « unknown » muet, jamais un item perdu)."""
+    el = _update()
+    el["content"] = {"quizCardComponent": {"title": {"text": "Testez-vous"}}}
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["content_type"] == "quiz_card"
+    assert item["content_title"] == "Testez-vous"
+
+
+def test_plusieurs_composants_le_dominant_gagne():
+    """Un update peut porter plusieurs composants : le plus discriminant l'emporte, et
+    l'intitulé rendu est CELUI de ce composant (pas d'appariement trompeur)."""
+    el = _update()
+    el["content"] = {
+        "imageComponent": {"images": []},
+        "pollComponent": {"question": {"text": "On sonde ?"}},
+    }
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["content_type"] == "poll"
+    assert item["content_title"] == "On sonde ?"
+
+
+def test_cles_non_composants_ignorees():
+    """`resharedUpdate`, `$type`… ne sont pas des composants de contenu."""
+    el = _update()
+    el["content"] = {"$type": "com.linkedin.voyager.feed.Update",
+                     "resharedUpdate": {"actor": {"name": {"text": "Léa"}}}}
+    assert parse_feed(_envelope([el]))["items"][0]["content_type"] == "text"
+
+
+def test_intitule_tronque():
+    el = _update()
+    el["content"] = {"articleComponent": {"title": {"text": "T" * 400}}}
+    title = parse_feed(_envelope([el]))["items"][0]["content_title"]
+    assert len(title) == 140
+
+
+# --- REPOST : la substance est dans l'original -------------------------------
+
+def test_repost_expose_le_texte_de_l_original():
+    el = _update()
+    el["commentary"] = {"text": {"text": "👏"}}     # le mot du re-partageur ne dit rien
+    el["resharedUpdate"] = {
+        "actor": {"name": {"text": "Sylvie Martin"}},
+        "commentary": {"text": {"text": "Notre levée de 12 M€ est bouclée."}},
+    }
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["text"] == "👏"                      # surface inchangée
+    assert item["original_text"] == "Notre levée de 12 M€ est bouclée."
+    assert item["original_content_type"] == "text"
+
+
+def test_repost_expose_le_type_de_contenu_de_l_original():
+    el = _update()
+    el["content"] = {"resharedUpdate": {
+        "actor": {"name": {"text": "Léa Bernard"}},
+        "commentary": {"text": {"text": "🧐"}},
+        "content": {"documentComponent": {"document": {"title": "Étude 2026"}}},
+    }}
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["original_text"] == "🧐"
+    assert item["original_content_type"] == "document"
+    assert item["content_type"] == "text"   # le re-partageur, lui, n'a rien attaché
+
+
+def test_post_ordinaire_na_pas_de_champs_original():
+    item = parse_feed(_envelope([_update()]))["items"][0]
+    assert item["original_text"] is None
+    assert item["original_content_type"] is None
+
+
+def test_cout_des_champs_ajoutes_reste_borne():
+    """Garde-fou de POIDS. Le bloc `content` brut pèse ~4 700 caractères ; mesuré sur
+    ces fixtures, l'ajout coûte 101 car. sur un post nu (le type + 3 valeurs nulles),
+    134 avec un titre d'article réel, 242 au pire cas (intitulé plafonné à 140)."""
+    import json
+
+    added = ("content_type", "content_title", "original_text", "original_content_type")
+
+    def cost(el):
+        item = parse_feed(_envelope([el]))["items"][0]
+        full = len(json.dumps(item, ensure_ascii=False))
+        without = len(json.dumps({k: v for k, v in item.items() if k not in added},
+                                 ensure_ascii=False))
+        return full - without
+
+    article = _update()
+    article["content"] = {"articleComponent": {
+        "title": {"text": "Les 7 signaux d'un pipe qui ment"}}}
+    long_title = _update()
+    long_title["content"] = {"articleComponent": {"title": {"text": "T" * 400}}}
+    assert cost(_update()) <= 105        # post nu : le type + 3 valeurs nulles
+    assert cost(article) <= 140          # + un titre d'article réel
+    assert cost(long_title) <= 250       # pire cas : intitulé au plafond (140 car.)

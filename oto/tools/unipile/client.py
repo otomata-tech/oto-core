@@ -256,15 +256,35 @@ class UnipileClient:
         return data or []
 
     def account_id(self) -> str:
+        """`account_id` LinkedIn : celui fourni, sinon le 1er compte LinkedIn du compte
+        Unipile.
+
+        ⚠️ La casse du provider a CHANGÉ en v2 : un compte porte `provider:"linkedin"`
+        (minuscules) et **plus de champ `type`** (champs v2 relevés en live :
+        application_id, created_at, id, is_locked, metadata, name, object, provider,
+        proxy, status, user_id). L'ancien test `== "LINKEDIN"` ne pouvait donc plus
+        JAMAIS être vrai → la découverte automatique tombait toujours dans le « aucun
+        compte LinkedIn connecté » alors qu'un compte opérationnel existait : un
+        diagnostic qui MENT coûte des heures. Comparaison insensible à la casse, sur
+        `provider` (v2) avec repli `type` (v1), et le message d'échec ÉNUMÈRE les
+        providers réellement vus."""
         if self._account_id:
             return self._account_id
+        seen: list[str] = []
         for acc in self.list_accounts():
-            if (acc.get("type") or acc.get("provider")) == "LINKEDIN":
-                self._account_id = acc["id"]
+            if not isinstance(acc, dict):
+                continue
+            provider = str(acc.get("provider") or acc.get("type") or "").strip()
+            if provider:
+                seen.append(provider)
+            if provider.lower() == "linkedin" and acc.get("id"):
+                self._account_id = str(acc["id"])
                 return self._account_id
+        inventory = (f" Comptes connectés : {', '.join(sorted(set(seen)))}."
+                     if seen else " Aucun compte connecté sur cette clé Unipile.")
         raise UnipileError(
             "Aucun compte LinkedIn connecté sur Unipile "
-            "(et UNIPILE_LINKEDIN_ACCOUNT_ID non défini)."
+            "(et UNIPILE_LINKEDIN_ACCOUNT_ID non défini)." + inventory
         )
 
     def account_alive(self, account_id: str) -> bool:
@@ -1372,6 +1392,102 @@ def _comment_authors(el: dict, included_by_urn: dict,
     return names
 
 
+# --- DE QUOI un post est fait (bloc `content` de l'update) -------------------
+# Voyager range le média d'un post dans `content`, sous une clé qui NOMME le type de
+# composant (`imageComponent`, `pollComponent`, `carouselContent`… — 42 noms relevés
+# sur un feed réel). Ce bloc était intégralement jeté au mapping : un post à 2 775
+# réactions dont le texte se réduit à « 🧐 » (tout le propos est dans l'image) devenait
+# INCLASSABLE pour un agent — le post le plus engageant d'une page, invisible.
+# Le bloc brut pèse ~4 700 caractères (images en 4 résolutions + tracking) : on n'en
+# garde que le TYPE normalisé + l'intitulé porteur de sens quand il est là, ~100
+# caractères. Le type est DÉRIVÉ du nom de la clé (suffixe `Component`/`Content`
+# retiré, camelCase → snake_case), pas d'une table exhaustive à maintenir : un
+# composant jamais vu rend son propre nom normalisé plutôt qu'un « unknown » muet.
+# La table ci-dessous ne porte donc QUE les synonymes à replier.
+_CONTENT_ALIASES = {
+    "linked_in_video": "video",     # vidéo native LinkedIn
+    "external_video": "video",      # YouTube & co. embarqués
+    "native_video": "video",
+    "slideshow": "carousel",        # diaporama d'images = un carrousel
+}
+# Ordre de DOMINANCE quand un update porte plusieurs composants : le premier de cette
+# liste gagne. Classement par pouvoir de tri décroissant — ce qui appelle une action
+# précise (sondage, document, article) avant le simple habillage (image). Un type
+# inconnu passe après tous les connus (il informe, mais on ne sait pas encore combien).
+_CONTENT_PRIORITY = ("poll", "document", "article", "newsletter", "event", "job",
+                     "celebration", "video", "carousel", "image", "entity")
+# Clés d'intitulé sondées sur le composant dominant (titre d'article, question d'un
+# sondage, titre d'un document, texte alternatif d'une image…).
+_CONTENT_LABEL_KEYS = ("title", "question", "headline", "name",
+                       "altText", "accessibilityText")
+_CONTENT_LABEL_MAX = 140   # borne le pire cas (≈ la limite d'une question de sondage)
+_CAMEL_SPLIT = re.compile(r"(?<=[a-z0-9])(?=[A-Z])")
+
+
+def _content_key_to_type(key: str) -> Optional[str]:
+    """`imageComponent` → `image`, `linkedInVideoComponent` → `video`,
+    `carouselContent` → `carousel`. None si la clé n'est pas un composant de contenu
+    (`resharedUpdate`, `$type`… restent hors du compte)."""
+    for suffix in ("Component", "Content"):
+        if key.endswith(suffix) and len(key) > len(suffix):
+            base = _CAMEL_SPLIT.sub("_", key[: -len(suffix)]).lower()
+            return _CONTENT_ALIASES.get(base, base)
+    return None
+
+
+def _content_label(node: Any) -> Optional[str]:
+    """Intitulé porteur de sens d'un composant, s'il est disponible SANS COÛT (déjà
+    dans la charge utile) : titre d'article, question de sondage, titre de document,
+    texte alternatif d'une image. Sondé sur le composant, puis UN cran plus bas — ses
+    sous-objets (`document.title`) et le 1er élément de ses listes
+    (`images[0].accessibilityText`), là où Voyager range ces intitulés.
+    Tronqué à `_CONTENT_LABEL_MAX`. None si le composant n'en porte pas."""
+    if not isinstance(node, dict):
+        return None
+    candidates = [node]
+    for value in node.values():
+        if isinstance(value, dict):
+            candidates.append(value)
+        elif isinstance(value, list) and value and isinstance(value[0], dict):
+            candidates.append(value[0])
+    for obj in candidates:
+        for key in _CONTENT_LABEL_KEYS:
+            label = _text_of(obj.get(key))
+            if isinstance(label, str) and label.strip():
+                return label.strip()[:_CONTENT_LABEL_MAX]
+    return None
+
+
+def _content_facets(content: Any) -> tuple[str, Optional[str]]:
+    """(content_type, content_title) d'un bloc `content` Voyager.
+
+    Pas de bloc / aucun composant reconnaissable → `("text", None)` : le post ne porte
+    que son texte, ce n'est pas un échec de mapping (un vrai schéma inattendu, lui,
+    fait lever `_map_feed_item` et l'item est journalisé puis ignoré).
+    Plusieurs composants → le DOMINANT (`_CONTENT_PRIORITY`, puis ordre d'apparition)
+    donne le type ET l'intitulé : un champ scalaire reste filtrable à l'égalité en aval
+    (miroir datastore), là où une liste ou un « image+article » ne l'est pas."""
+    if not isinstance(content, dict):
+        return "text", None
+    found: list[tuple[int, int, str, Any]] = []
+    for i, (key, node) in enumerate(content.items()):
+        ctype = _content_key_to_type(key)
+        if not ctype:
+            continue
+        rank = (_CONTENT_PRIORITY.index(ctype) if ctype in _CONTENT_PRIORITY
+                else len(_CONTENT_PRIORITY))
+        found.append((rank, i, ctype, node))
+    if not found:
+        return "text", None
+    found.sort(key=lambda f: (f[0], f[1]))
+    _, _, ctype, node = found[0]
+    if ctype not in _CONTENT_PRIORITY:
+        # Composant jamais vu : on rend son nom tel que Voyager le nomme (normalisé)
+        # plutôt qu'un « unknown » muet — traçable quand LinkedIn en ajoute un.
+        logger.debug("unipile feed: composant de contenu inconnu (%s)", ctype)
+    return ctype, _content_label(node)
+
+
 def _map_feed_item(el: dict, included_by_urn: dict) -> dict:
     """Un update Voyager → item normalisé. Lève si `el` n'est pas un update
     exploitable (ni actor ni commentary) — l'appelant gère le fallback."""
@@ -1401,6 +1517,12 @@ def _map_feed_item(el: dict, included_by_urn: dict) -> dict:
     if not reshared:
         reshared = _deep_get(el, "content", "resharedUpdate", default={}) or {}
     reshared_actor = reshared.get("actor") if isinstance(reshared.get("actor"), dict) else {}
+    # …et son COMMENTAIRE aussi : sur un repost, `text` porte le mot du re-partageur —
+    # souvent vide ou « 👏 » — pendant que le contenu réel, celui sur lequel la règle de
+    # tri veut juger, restait introuvable. Même traitement de type que le post porteur.
+    reshared_commentary = (reshared.get("commentary")
+                           if isinstance(reshared.get("commentary"), dict) else {})
+    content_type, content_title = _content_facets(el.get("content"))
     return {
         "urn": activity_urn or el.get("entityUrn"),
         "author_name": _text_of(actor.get("name")),
@@ -1415,9 +1537,23 @@ def _map_feed_item(el: dict, included_by_urn: dict) -> dict:
         "feed_reason": feed_reason,
         "surfaced_by": surfaced_by,
         "comment_authors": _comment_authors(el, included_by_urn, activity_urn),
+        # DE QUOI le post est fait : sans ça, un post dont tout le propos est dans
+        # l'image (texte = « 🧐 », 2 775 réactions) est inclassable — le type normalisé
+        # + l'intitulé gratuit (titre d'article, question de sondage) le rendent triable
+        # sans rapatrier le bloc `content` (~4 700 caractères, 93 % de tracking et de
+        # miniatures). `content_type` vaut toujours quelque chose (`text` = post nu).
+        "content_type": content_type,
+        "content_title": content_title,
         "post_url": post_url,
         "is_repost": bool(reshared),
         "original_author_name": _text_of(reshared_actor.get("name")) or None,
+        # Sur un repost, la substance est dans l'ORIGINAL : son texte et la nature de
+        # son contenu. None hors repost (le champ reste présent : le miroir aval
+        # projette des colonnes fixes).
+        "original_text": (_text_of(reshared_commentary.get("text"))
+                          or _text_of(reshared_commentary) or None) if reshared else None,
+        "original_content_type": (_content_facets(reshared.get("content"))[0]
+                                  if reshared else None),
     }
 
 
