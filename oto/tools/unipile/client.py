@@ -1471,6 +1471,14 @@ def _content_facets(content: Any) -> tuple[str, Optional[str]]:
         return "text", None
     found: list[tuple[int, int, str, Any]] = []
     for i, (key, node) in enumerate(content.items()):
+        # ⚠️ Voyager déclare TOUTES les clés de son schéma GraphQL, la quasi-totalité à
+        # `null` : la PRÉSENCE d'une clé ne dit rien, seule sa VALEUR compte. Sans ce
+        # test, `dynamicPollComponent: null` faisait un sondage de n'importe quel post —
+        # et `poll` étant en tête de la dominance, 48 posts sur 60 sont sortis en `poll`
+        # au premier run réel (12/08). Une donnée fausse écrite à chaque sync est pire
+        # que pas de donnée : l'agent trie dessus sans pouvoir en douter.
+        if node is None or node == {} or node == [] or node == "":
+            continue
         ctype = _content_key_to_type(key)
         if not ctype:
             continue

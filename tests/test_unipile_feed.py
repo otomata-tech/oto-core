@@ -420,3 +420,28 @@ def test_cout_des_champs_ajoutes_reste_borne():
     assert cost(_update()) <= 105        # post nu : le type + 3 valeurs nulles
     assert cost(article) <= 140          # + un titre d'article réel
     assert cost(long_title) <= 250       # pire cas : intitulé au plafond (140 car.)
+
+
+def test_une_cle_de_composant_NULLE_ne_fait_pas_un_type():
+    """Voyager déclare TOUTES les clés de son schéma, la quasi-totalité à `null`.
+    Compter leur présence rendait `poll` sur n'importe quel post (48/60 au premier
+    run réel du 12/08, `poll` étant en tête de la dominance)."""
+    el = _update()
+    el["content"] = {
+        "dynamicPollComponent": None,      # déclarée, vide — le piège
+        "pollComponent": None,
+        "documentComponent": {},           # vide aussi
+        "articleComponent": [],
+        "imageComponent": {"images": [{"accessibilityText": "un schéma"}]},
+    }
+    item = parse_feed(_envelope([el]))["items"][0]
+    assert item["content_type"] == "image", (
+        "seule une clé PORTEUSE compte — une clé nulle n'est pas un composant")
+    assert item["content_title"] == "un schéma"
+
+
+def test_un_content_entierement_nul_reste_du_texte():
+    el = _update()
+    el["content"] = {"pollComponent": None, "videoComponent": None,
+                     "carouselContent": {}}
+    assert parse_feed(_envelope([el]))["items"][0]["content_type"] == "text"
