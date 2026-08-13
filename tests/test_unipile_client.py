@@ -303,6 +303,112 @@ def test_send_message_existing_vs_new_chat():
     assert rec[1][3] == {"users_ids": ["ACoAAA"], "text": "hi"}
 
 
+# ---- forme d'endpoint par provider (inbox vs plate) ----------------------
+# Unipile expose la MÊME opération sous deux routes — « GET /v2/:account_id/chats or
+# GET /v2/:account_id/inboxes/:inbox_id/chats **if the provider uses inboxes** » — et
+# répond 501 à la mauvaise, dans les deux sens. Ce qu'on verrouille ici, c'est la
+# DÉRIVATION (provider → route) et le rattrapage sur le signal 501, pas une route
+# qu'on croit juste : la bascule en dur vers l'inbox (correcte pour LinkedIn) avait
+# cassé les cinq canaux sans inbox, dont WhatsApp.
+
+def _erroring_client(status_by_path, provider=None, recorder=None):
+    """Client stubé qui lève `UnipileError(status_code=…)` sur les paths déclarés
+    dans `status_by_path`, et rend `{"data": []}` sur les autres."""
+    c = UnipileClient(api_key="k", account_id="acc", provider=provider)
+
+    def fake(method, path, params=None, json=None, timeout=None):
+        if recorder is not None:
+            recorder.append((method, path, params, json))
+        status = status_by_path.get(path)
+        if status is not None:
+            raise UnipileError(f"Unipile {status}: nope", status_code=status)
+        return {"data": []}
+
+    c._request = fake  # type: ignore[method-assign]
+    return c
+
+
+def test_uses_inboxes_derives_from_provider():
+    mk = lambda p: UnipileClient(api_key="k", account_id="acc", provider=p)  # noqa: E731
+    assert mk("LINKEDIN").uses_inboxes()
+    assert mk("linkedin").uses_inboxes()          # casse indifférente
+    assert mk(None).uses_inboxes()                # non déclaré → LinkedIn (compat)
+    for chan in ("WHATSAPP", "TELEGRAM", "INSTAGRAM", "MESSENGER", "TWITTER"):
+        assert not mk(chan).uses_inboxes(), chan
+
+
+def test_list_chats_plain_shape_for_a_provider_without_inbox():
+    rec = []
+    c = _client(canned={"data": []}, recorder=rec)
+    c.provider = "WHATSAPP"
+    c.list_chats(limit=5)
+    # une seule requête, sur la route plate : pas d'aller-retour 501 à payer.
+    assert [r[1] for r in rec] == ["/acc/chats"]
+    assert rec[0][2] == {"limit": 5}
+
+
+def test_list_chats_heals_when_upstream_501s_on_the_declared_shape():
+    # provider non déclaré → inbox tentée d'abord ; Unipile dit « pas cette forme ».
+    rec = []
+    c = _erroring_client({"/acc/inboxes/CLASSIC_PRIMARY/chats": 501}, recorder=rec)
+    out = c.list_chats()
+    assert [r[1] for r in rec] == ["/acc/inboxes/CLASSIC_PRIMARY/chats", "/acc/chats"]
+    assert out["items"] == []
+    # …et le symétrique : provider sans inbox qu'Unipile reclasserait côté inbox.
+    rec.clear()
+    c2 = _erroring_client({"/acc/chats": 501}, provider="WHATSAPP", recorder=rec)
+    c2.list_chats()
+    assert [r[1] for r in rec] == ["/acc/chats", "/acc/inboxes/CLASSIC_PRIMARY/chats"]
+
+
+def test_only_501_switches_shape():
+    """Un 404/401/500 est une vraie erreur : elle remonte, sans seconde route."""
+    for status in (400, 401, 404, 500):
+        rec = []
+        c = _erroring_client({"/acc/inboxes/CLASSIC_PRIMARY/chats": status},
+                             recorder=rec)
+        with pytest.raises(UnipileError) as ei:
+            c.list_chats()
+        assert ei.value.status_code == status
+        assert [r[1] for r in rec] == ["/acc/inboxes/CLASSIC_PRIMARY/chats"]
+
+
+def test_send_new_chat_plain_shape_for_a_provider_without_inbox():
+    rec = []
+    c = _client(canned={}, recorder=rec)
+    c.provider = "WHATSAPP"
+    c.send_message("hi", attendee_id="33600000000@s.whatsapp.net")
+    assert [r[1] for r in rec] == ["/acc/chats/send"]
+    # même corps que la forme inbox : seule la route change.
+    assert rec[0][3] == {"users_ids": ["33600000000@s.whatsapp.net"], "text": "hi"}
+
+
+def test_send_new_chat_heals_on_501():
+    rec = []
+    c = _erroring_client({"/acc/chats/send": 501}, provider="WHATSAPP", recorder=rec)
+    c.send_message("hi", attendee_id="X")
+    assert [r[1] for r in rec] == ["/acc/chats/send",
+                                   "/acc/inboxes/CLASSIC_PRIMARY/chats/send"]
+
+
+def test_reply_in_existing_chat_is_shape_agnostic():
+    """Répondre dans un fil existant n'a qu'une route (pas d'inbox dans le path) :
+    le canal n'y change rien — c'est bien la LISTE qui était cassée pour WhatsApp."""
+    for prov in (None, "LINKEDIN", "WHATSAPP"):
+        rec = []
+        c = _client(canned={}, recorder=rec)
+        c.provider = prov
+        c.send_message("hello", chat_id="CH1")
+        c.list_messages("CH1")
+        assert [r[1] for r in rec] == ["/acc/chats/CH1/messages/send",
+                                       "/acc/chats/CH1/messages"]
+
+
+def test_factory_passes_provider():
+    assert make_unipile_client(api_key="k", provider="whatsapp").provider == "WHATSAPP"
+    assert make_unipile_client(api_key="k").provider is None
+
+
 def test_react_message_requires_chat_id_in_v2():
     c = _client(canned={})
     with pytest.raises(UnipileError):

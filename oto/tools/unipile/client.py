@@ -77,6 +77,21 @@ _SCRAPE_TIMEOUT = (10, 60)
 # https://developer.unipile.com/docs/get-raw-data-example
 FEED_QUERY_ID = "voyagerFeedDashMainFeed.7a50ef8ba5a7865c23ad5df46f735709"
 
+# Providers dont la messagerie est rangée par INBOX. Unipile documente DEUX formes
+# d'endpoint pour la même opération — « Use `GET /v2/:account_id/chats` or
+# `GET /v2/:account_id/inboxes/:inbox_id/chats` **if the provider uses inboxes** »
+# (guide de migration messaging v2) — et répond **501** à la mauvaise, DANS LES DEUX
+# SENS. Le client ne servait que LinkedIn quand la forme inbox est arrivée (delta live
+# 2026-07-06) : la bascule a été faite en dur, donc appliquée aussi à WhatsApp/Telegram/
+# Instagram/Messenger/Twitter, qui n'ont pas d'inbox → 501 sur `op="list"` pour ces cinq
+# canaux, alors que leur compte est bien connecté. La forme est donc DÉCLARÉE par
+# provider (ci-dessous) — pas devinée par canal appelant, pas figée à un seul modèle.
+_INBOX_PROVIDERS = {"LINKEDIN"}
+# Provider supposé quand l'appelant n'en déclare pas : le client est historiquement
+# LinkedIn-first (`UNIPILE_LINKEDIN_ACCOUNT_ID`, découverte du 1er compte linkedin), et
+# un appelant qui ne dit rien attend le comportement d'avant.
+_DEFAULT_PROVIDER = "LINKEDIN"
+
 # Préfixe de path par produit LinkedIn (search & co.).
 _API_PREFIX = {
     "classic": "/linkedin/search",
@@ -175,11 +190,15 @@ class UnipileClient:
         api_key: Optional[str] = None,
         dsn: Optional[str] = None,
         account_id: Optional[str] = None,
+        provider: Optional[str] = None,
     ):
         self.api_key = api_key or require_secret("UNIPILE_API_KEY")
         self.dsn = dsn or get_secret("UNIPILE_DSN", DEFAULT_DSN)
         self.base_url = f"https://{self.dsn}/v2"
         self._account_id = account_id or get_secret("UNIPILE_LINKEDIN_ACCOUNT_ID")
+        # Canal du compte opéré (LINKEDIN, WHATSAPP, …). Sert la forme d'endpoint de
+        # messagerie (cf. `_INBOX_PROVIDERS`) ; None = supposé LinkedIn (compat).
+        self.provider = (provider or "").strip().upper() or None
         self.session = requests.Session()
         self.session.headers.update(
             {"X-API-KEY": self.api_key, "accept": "application/json"}
@@ -233,6 +252,41 @@ class UnipileClient:
     def _acct(self, sub_path: str) -> str:
         """Préfixe un sous-chemin par `/{account_id}` (path param v2)."""
         return f"/{quote(self.account_id(), safe='')}{sub_path}"
+
+    def uses_inboxes(self) -> bool:
+        """Le provider de ce compte range-t-il sa messagerie par inbox ? (cf.
+        `_INBOX_PROVIDERS`). Provider non déclaré → supposé LinkedIn."""
+        return (self.provider or _DEFAULT_PROVIDER) in _INBOX_PROVIDERS
+
+    def _by_shape(self, inbox_call, plain_call, what: str) -> Any:
+        """Appelle la forme d'endpoint DÉCLARÉE pour ce provider, et bascule sur
+        l'autre si Unipile répond **501**.
+
+        Le 501 d'Unipile n'est pas une panne : c'est l'amont qui NOMME la forme
+        attendue (« Use List inbox Chats endpoint », « Use Start a Chat in the given
+        inbox endpoint for this provider », et le symétrique pour un provider sans
+        inbox). Le rattrapage vaut donc dans les deux sens et ne masque rien
+        d'autre — tout autre statut remonte tel quel, et la bascule est
+        JOURNALISÉE : si Unipile reclasse un provider, ça se lit dans les logs au
+        lieu de casser un canal en silence, comme le 2026-07-06 côté LinkedIn puis
+        ce jour-là côté WhatsApp. L'identité (`account_id`) est dans le path des
+        deux formes : rien ne bascule ici que la ROUTE."""
+        inbox_first = self.uses_inboxes()
+        first, second = ((inbox_call, plain_call) if inbox_first
+                         else (plain_call, inbox_call))
+        try:
+            return first()
+        except UnipileError as e:
+            if e.status_code != 501:
+                raise
+            logger.warning(
+                "unipile %s: 501 sur la forme %s pour provider=%s — bascule sur "
+                "la forme %s. Si ça se répète, `_INBOX_PROVIDERS` a dérivé du "
+                "modèle Unipile.",
+                what, "inbox" if inbox_first else "plate",
+                self.provider or f"{_DEFAULT_PROVIDER} (supposé)",
+                "plate" if inbox_first else "inbox")
+            return second()
 
     @staticmethod
     def _norm(data: Any) -> Any:
@@ -676,17 +730,21 @@ class UnipileClient:
     def list_chats(self, limit: int = 20, cursor: Optional[str] = None,
                    with_attendee_names: bool = False,
                    inbox: str = "CLASSIC_PRIMARY") -> dict:
-        """Fils de messagerie. v2 : les chats sont rangés **par inbox**
-        (`GET /v2/{account}/inboxes/{inbox}/chats`) — l'ancien `/chats` renvoie
-        501 « Use List inbox Chats endpoint » pour LinkedIn (delta live 2026-07-06).
-        `inbox` défaut = `CLASSIC_PRIMARY` (boîte principale) ; autres inboxes via
-        `list_inboxes`."""
+        """Fils de messagerie, dans la forme d'endpoint du provider (`_by_shape`) :
+        **par inbox** pour LinkedIn (`GET /v2/{account}/inboxes/{inbox}/chats` —
+        l'ancien `/chats` y renvoie 501 « Use List inbox Chats endpoint », delta live
+        2026-07-06), **à plat** pour les providers sans inbox (WhatsApp, Telegram,
+        Instagram, Messenger, Twitter), où c'est la forme inbox qui rend 501.
+        `inbox` (LinkedIn) défaut = `CLASSIC_PRIMARY` ; autres via `list_inboxes`."""
         params: dict[str, Any] = {"limit": limit}
         if cursor:
             params["cursor"] = cursor
-        data = self._norm(self._request(
-            "GET", self._acct(f"/inboxes/{quote(inbox, safe='')}/chats"),
-            params=params))
+        data = self._norm(self._by_shape(
+            lambda: self._request(
+                "GET", self._acct(f"/inboxes/{quote(inbox, safe='')}/chats"),
+                params=params),
+            lambda: self._request("GET", self._acct("/chats"), params=params),
+            "list_chats"))
         if with_attendee_names:
             self._annotate_chat_attendees(data)
         return data
@@ -763,12 +821,18 @@ class UnipileClient:
         if not attendee_id:
             raise UnipileError("send_message : chat_id ou attendee_id requis.")
         # v2 : pour un provider à INBOX (LinkedIn), le nouveau fil passe par l'inbox —
-        # `POST /v2/{account}/inboxes/{inbox}/chats/send`, `users_ids`. Le `/chats/send`
-        # générique renvoie 501 « Use Start a Chat in the given inbox endpoint for this
-        # provider » (relevé live 2026-07-08 — même modèle inbox que list_chats). Signal #199/#200.
-        return self._request(
-            "POST", self._acct(f"/inboxes/{quote(inbox, safe='')}/chats/send"),
-            json={"users_ids": [attendee_id], "text": text},
+        # `POST /v2/{account}/inboxes/{inbox}/chats/send`. Le `/chats/send` générique y
+        # renvoie 501 « Use Start a Chat in the given inbox endpoint for this provider »
+        # (relevé live 2026-07-08 — même modèle inbox que list_chats, signal #199/#200) ;
+        # sans inbox (WhatsApp & co.), c'est l'inverse. Même corps des deux côtés
+        # (`users_ids`, qui remplace `attendees_ids` de v1) : seule la route change.
+        body = {"users_ids": [attendee_id], "text": text}
+        return self._by_shape(
+            lambda: self._request(
+                "POST", self._acct(f"/inboxes/{quote(inbox, safe='')}/chats/send"),
+                json=body),
+            lambda: self._request("POST", self._acct("/chats/send"), json=body),
+            "send_message",
         )
 
     # ---- réseau / outreach ----------------------------------------------
