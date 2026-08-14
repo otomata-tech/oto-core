@@ -309,6 +309,17 @@ class UnipileClient:
             return data.get("data") or data.get("items") or []
         return data or []
 
+    def delete_account(self, account_id: str) -> None:
+        """Retire un compte de l'instance Unipile — c'est ce qui LIBÈRE le siège
+        facturé (une déconnexion côté oto ne fait que dénouer le binding, le siège
+        continue de courir).
+
+        ⚠️ IRRÉVERSIBLE : la session hébergée est détruite. Une reconnexion de la
+        même personne repartira d'un `account_id` NEUF — donc l'historique de
+        propriété côté appelant (bindings morts) ne rebindera plus ce compte.
+        204 attendu ; un id inconnu remonte en `UnipileError` 404."""
+        self._request("DELETE", f"/accounts/{quote(account_id, safe='')}")
+
     def account_id(self) -> str:
         """`account_id` LinkedIn : celui fourni, sinon le 1er compte LinkedIn du compte
         Unipile.
