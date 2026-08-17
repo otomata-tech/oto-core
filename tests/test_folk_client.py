@@ -236,4 +236,132 @@ def test_webhook_event_types_are_the_documented_set():
     assert folk_client.WEBHOOK_EVENT_TYPES >= {
         "person.created", "company.updated", "object.deleted", "reminder.triggered",
     }
+
+
+# --- Groups ------------------------------------------------------------------
+
+def test_list_groups(c, calls):
+    c.list_groups()
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/groups"
+
+
+def test_create_group(c, calls):
+    c.create_group("Leads", "private")
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/groups"
+    assert calls[-1]["json"] == {"name": "Leads", "visibility": "private"}
+
+
+def test_update_group(c, calls):
+    c.update_group("grp_1", visibility="public")
+    assert calls[-1]["method"] == "PATCH"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1"
+    assert calls[-1]["json"] == {"visibility": "public"}
+
+
+def test_get_group_custom_fields_paginates(c, monkeypatch):
+    """Le endpoint est paginé cursor côté API (jusqu'à 100/page) : un `_request`
+    simple tronquait silencieusement au-delà de la première page."""
+    pages = [
+        {"data": {"items": [{"name": "Status"}],
+                  "pagination": {"nextLink": f"{BASE}/groups/grp_1/custom-fields/person?cursor=abc"}}},
+        {"data": {"items": [{"name": "Source"}], "pagination": {}}},
+    ]
+
+    def fake_request(method, url, headers=None, **kwargs):
+        return _Resp(pages.pop(0))
+
+    monkeypatch.setattr(folk_client.requests, "request", fake_request)
+    result = c.get_group_custom_fields("grp_1")
+    assert result == [{"name": "Status"}, {"name": "Source"}]
+
+
+def test_get_group_custom_fields_quotes_entity_type(c, calls):
+    c.get_group_custom_fields("grp_1", entity_type="deal type")
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/custom-fields/deal%20type"
+
+
+def test_get_group_custom_field(c, calls):
+    c.get_group_custom_field("grp_1", "person", "Deal Status")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/custom-fields/person/Deal%20Status"
+
+
+def test_create_group_custom_field(c, calls):
+    c.create_group_custom_field("grp_1", "person", type="textField", name="Status")
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/custom-fields/person"
+    assert calls[-1]["json"] == {"type": "textField", "name": "Status"}
+
+
+def test_update_group_custom_field(c, calls):
+    c.update_group_custom_field(
+        "grp_1", "person", "Status",
+        addOptions=[{"label": "New", "color": "#5738ff"}],
+    )
+    assert calls[-1]["method"] == "PATCH"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/custom-fields/person/Status"
+    assert calls[-1]["json"] == {"addOptions": [{"label": "New", "color": "#5738ff"}]}
+
+
+def test_update_group_custom_field_unwraps_data_item(c, monkeypatch):
+    """Seul endpoint Folk du client dont l'exemple de réponse officiel nest le
+    champ sous `data.item` (+ `data.nextLink`) plutôt qu'à plat sous `data` —
+    tous ses siblings (get/create custom field) rendent le champ à plat."""
+    payload = {"data": {
+        "item": {"name": "Status", "type": "singleSelect",
+                  "options": [{"id": "gcfo_1", "label": "Active", "color": "#ffffff"}]},
+        "nextLink": f"{BASE}/groups/grp_1/custom-fields/person/Status",
+    }}
+
+    def fake_request(method, url, headers=None, **kwargs):
+        return _Resp(payload)
+
+    monkeypatch.setattr(folk_client.requests, "request", fake_request)
+    result = c.update_group_custom_field("grp_1", "person", "Status", name="Status")
+    assert result == {"name": "Status", "type": "singleSelect",
+                       "options": [{"id": "gcfo_1", "label": "Active", "color": "#ffffff"}]}
+
+
+# --- Group members -------------------------------------------------------
+
+def test_list_group_members(c, calls):
+    c.list_group_members("grp_1")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/members"
+
+
+def test_list_group_members_paginates(c, monkeypatch):
+    pages = [
+        {"data": {"items": [{"id": "usr_1"}],
+                  "pagination": {"nextLink": f"{BASE}/groups/grp_1/members?cursor=abc"}}},
+        {"data": {"items": [{"id": "usr_2"}], "pagination": {}}},
+    ]
+
+    def fake_request(method, url, headers=None, **kwargs):
+        return _Resp(pages.pop(0))
+
+    monkeypatch.setattr(folk_client.requests, "request", fake_request)
+    assert c.list_group_members("grp_1") == [{"id": "usr_1"}, {"id": "usr_2"}]
+
+
+def test_add_group_member(c, calls):
+    c.add_group_member("grp_1", "usr_1", "admin")
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/members"
+    assert calls[-1]["json"] == {"id": "usr_1", "role": "admin"}
+
+
+def test_remove_group_member(c, calls):
+    c.remove_group_member("grp_1", "usr_1")
+    assert calls[-1]["method"] == "DELETE"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/members/usr_1"
+
+
+def test_update_group_member(c, calls):
+    c.update_group_member("grp_1", "usr_1", "reader")
+    assert calls[-1]["method"] == "PATCH"
+    assert calls[-1]["url"] == f"{BASE}/groups/grp_1/members/usr_1"
+    assert calls[-1]["json"] == {"role": "reader"}
     assert "deal.created" not in folk_client.WEBHOOK_EVENT_TYPES  # deals = object.*

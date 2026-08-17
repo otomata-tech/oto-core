@@ -2,7 +2,7 @@
 
 import time
 from typing import Optional, Dict, Any, List
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote
 
 import requests
 
@@ -108,9 +108,79 @@ class FolkClient:
     def list_groups(self) -> List[Dict]:
         return self._paginate("groups")
 
+    def create_group(self, name: str, visibility: str) -> Dict:
+        return self._request("POST", "groups", json={
+            "name": name, "visibility": visibility,
+        }).get("data", {})
+
+    def update_group(self, group_id: str, **fields) -> Dict:
+        return self._request("PATCH", f"groups/{group_id}", json=fields).get("data", {})
+
+    # entity_type/custom_field_name sont des noms libres (espaces, accents…), pas
+    # des ids opaques — quote() sinon un nom comme "Deal Status" casse le chemin.
+
     def get_group_custom_fields(self, group_id: str, entity_type: str = "person") -> List[Dict]:
-        data = self._request("GET", f"groups/{group_id}/custom-fields/{entity_type}")
-        return data.get("data", {}).get("items", [])
+        # Paginé côté API (cursor, jusqu'à 100/page) — un groupe avec >20 champs
+        # custom (limite par défaut) était silencieusement tronqué par un `_request`
+        # simple.
+        return self._paginate(f"groups/{group_id}/custom-fields/{quote(entity_type, safe='')}")
+
+    def get_group_custom_field(self, group_id: str, entity_type: str,
+                               custom_field_name: str) -> Dict:
+        return self._request(
+            "GET",
+            f"groups/{group_id}/custom-fields/{quote(entity_type, safe='')}/"
+            f"{quote(custom_field_name, safe='')}",
+        ).get("data", {})
+
+    def create_group_custom_field(self, group_id: str, entity_type: str, **field) -> Dict:
+        return self._request(
+            "POST", f"groups/{group_id}/custom-fields/{quote(entity_type, safe='')}",
+            json=field,
+        ).get("data", {})
+
+    def update_group_custom_field(self, group_id: str, entity_type: str,
+                                  custom_field_name: str, **fields) -> Dict:
+        # Seul endpoint Folk de ce client dont la doc montre le champ nested
+        # sous `data.item` (+ `data.nextLink`) plutôt qu'à plat sous `data` —
+        # confirmé sur l'exemple JSON brut de la doc (get/create custom field,
+        # eux, rendent le champ à plat). `.get("item", data)` couvre les deux
+        # formes si Folk aligne un jour ce endpoint sur ses siblings.
+        #
+        # Renommage vérifié EN LIVE (2026-08-17, workspace de test) : la
+        # réponse du PATCH porte bien le NOUVEAU nom (`item.name`), et un
+        # `get_custom_field` sur l'ancien nom juste après renvoie 404 propre —
+        # pas de fenêtre où `custom_field_name` deviendrait incohérent entre
+        # la réponse et un re-fetch.
+        data = self._request(
+            "PATCH",
+            f"groups/{group_id}/custom-fields/{quote(entity_type, safe='')}/"
+            f"{quote(custom_field_name, safe='')}",
+            json=fields,
+        ).get("data", {})
+        return data.get("item", data)
+
+    # --- Group members ---
+    # user_id est un id opaque (usr_…), pas de quote() nécessaire (≠ entity_type/
+    # custom_field_name qui sont des noms libres).
+
+    def list_group_members(self, group_id: str) -> List[Dict]:
+        # Paginé côté API (cursor, jusqu'à 100/page) — même bug que
+        # get_group_custom_fields évité d'entrée : _paginate, pas _request.
+        return self._paginate(f"groups/{group_id}/members")
+
+    def add_group_member(self, group_id: str, user_id: str, role: str) -> Dict:
+        return self._request("POST", f"groups/{group_id}/members", json={
+            "id": user_id, "role": role,
+        }).get("data", {})
+
+    def remove_group_member(self, group_id: str, user_id: str) -> Dict:
+        return self._request("DELETE", f"groups/{group_id}/members/{user_id}")
+
+    def update_group_member(self, group_id: str, user_id: str, role: str) -> Dict:
+        return self._request(
+            "PATCH", f"groups/{group_id}/members/{user_id}", json={"role": role},
+        ).get("data", {})
 
     # --- People ---
 
