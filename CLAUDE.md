@@ -50,4 +50,12 @@ Ajouter un provider = un module exposant `lookup(name)` + une ligne au registre
 ## Gotchas
 
 - **Namespace cross-package** : oto-core fournit `oto.tools`/`oto.config`, oto-cli fournit `oto.cli`/`oto.commands`. Les deux installés editable cohabitent dans le même `oto`. Changer le pyproject d'un des deux → **réinstaller editable** (le finder setuptools suit le pyproject).
+- ⚠️ **La CI doit installer tout extra dont un TEST importe la dépendance.** Elle
+  installait `-e ".[anonymize]"` seul : `tests/test_gmail_headers_and_draft.py`
+  importe le client Gmail, donc `google-api-python-client` (extra `google`) →
+  `ModuleNotFoundError` **à la collecte**, pytest s'arrête avant le premier test et
+  le job échoue sans rien avoir vérifié. `main` est restée rouge du 12 au 18/08/2026,
+  et **aucune PR ne pouvait devenir verte** — la garde version-skew du backend
+  renvoyait alors des PR saines en échec. Un extra ajouté ici se répercute dans
+  `.github/workflows/ci.yml`.
 - **Sur PyPI depuis 1.6.0** (2026-06-13, promesse ADR 0005). Release = bump version pyproject → build+twine depuis `git archive HEAD` (recette meta-repo ; hatch cassé sur cette machine). ⚠️ **Toujours bumper le champ `version` AVEC le tag** : un tag `vX.Y.Z` créé sans bumper `version` (resté en dessous) fait mentir `pip show oto-core` (vu le 2026-06-22 : tag v1.7.0 sur code à `version="1.6.1"` → prod affichait 1.6.1 malgré le bon code → fausse piste « bump non appliqué »). oto-backend pin oto-core par **tag git** (`@vX.Y.Z`) ; bump = nouveau tag + édit du pin backend. ⚠️ Les data files runtime (`sirene/data`, `pdf/templates`) sont déclarés en `package-data` — tout nouveau fichier chargé via `Path(__file__)` doit y être ajouté, sinon la wheel casse. Les installs editable (box, oto-cli local) ne sont PAS affectés par un publish — `git pull` requis.
