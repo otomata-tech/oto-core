@@ -18,7 +18,12 @@ jobs:
         with:
           python-version: "3.12"
           cache: pip
-      - name: Install (+ anonymize extra pour le chemin faker)
-        run: pip install -e ".[anonymize]" pytest
+      # `anonymize` = le chemin faker ; `google` = les clients Gmail/Drive/Keep, dont
+      # les tests importent google-api-python-client. Sans lui, la COLLECTE pytest
+      # s'interrompt (ModuleNotFoundError) et la CI ne teste plus rien du tout —
+      # elle est restée rouge sur `main` du 12 au 18/08/2026 pour cette raison.
+      # Tout nouvel extra dont un test importe la dépendance doit atterrir ici.
+      - name: Install (extras dont les tests importent les deps)
+        run: pip install -e ".[anonymize,google]" pytest
       - name: Tests
         run: pytest -q
