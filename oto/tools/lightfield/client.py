@@ -47,11 +47,21 @@ Conventions à connaître (elles conditionnent l'appelant) :
 Écritures : `POST` partout, y compris les mises à jour (`POST /v1/accounts/{id}` —
 il n'y a ni PUT ni PATCH). Ce client N'EST PAS en lecture seule.
 
+**Envoi d'email** : autorisé (arbitrage mainteneur du 19/08/2026), aux mêmes deux
+verrous que l'écriture Origami — le connecteur n'existe que si une organisation pose
+SA clé, et l'envoi part d'une boîte que le propriétaire de cette clé a lui-même
+connectée. La doc éditeur le dit : « The `from` value must be a bare email address
+for a connected mail account owned by the API key user. » Sans boîte connectée,
+l'amont refuse et rien ne part. ⚠️ Réponses et transferts ne sont PAS supportés par
+l'API (« replies and forwards are not supported yet ») : `send_email` crée toujours
+un message NEUF, même si l'appelant croit répondre à un fil.
+
 **Délibérément absent** (hors périmètre du connecteur oto, à ne pas « compléter » sans
-décision) : `POST /v1/emails/send` et le brouillon d'email (credential capable
-d'envoyer — question de politique non tranchée), toutes les suppressions, les fusions,
-les sessions d'upload de fichiers, messages et canaux, l'état des exécutions de
-workflow, l'historique de champs, et le CRUD des types d'objets personnalisés.
+décision) : toutes les suppressions, les fusions, les sessions d'upload de fichiers,
+messages et canaux, l'état des exécutions de workflow, l'historique de champs, et le
+CRUD des types d'objets personnalisés. ⚠️ Conséquence directe : les pièces jointes
+d'un envoi sont des identifiants issus du cycle d'upload, qui n'est pas exposé —
+`attachments` passe donc, mais il n'y a aujourd'hui aucun moyen de fabriquer l'id.
 
 Requires: requests
 """
@@ -385,6 +395,47 @@ class LightfieldClient:
     def get_email(self, email_id: str) -> Dict[str, Any]:
         """GET /v1/emails/{id}. Scope `emails:read`."""
         return self._request("GET", f"/v1/emails/{email_id}")
+
+    @staticmethod
+    def _check_from(payload: Dict[str, Any]) -> None:
+        """`from` absent = 400 amont. Le dire ICI nomme la vraie contrainte : ce n'est
+        pas une adresse quelconque, c'est une boîte CONNECTÉE par le propriétaire de la
+        clé — le second verrou qui rend l'envoi acceptable."""
+        if not isinstance(payload, dict):
+            raise ValueError("le corps doit être un dict.")
+        if not str(payload.get("from") or "").strip():
+            raise ValueError(
+                "`from` requis : l'adresse nue d'une boîte mail CONNECTÉE (Google ou "
+                "Microsoft) appartenant au propriétaire de la clé API. Sans boîte "
+                "connectée côté Lightfield, l'envoi est refusé en amont.")
+
+    def send_email(self, payload: Dict[str, Any],
+                   idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        """POST /v1/emails/send — ENVOI RÉEL depuis la boîte connectée de `from`.
+        Scope `emails:create`.
+
+        `payload` = `{from, to, cc?, bcc?, subject?, messageBody?, attachments?}`.
+        ⚠️ Crée toujours un message NEUF : l'API ne sait pas répondre à un fil ni
+        transférer. ⚠️ `attachments` attend des ids de fichiers issus du cycle
+        d'upload, que ce client n'expose pas.
+
+        C'est le seul geste de ce client qui SORT de la plateforme et atteint une
+        personne réelle : la couche appelante doit le garder derrière un dry-run.
+        """
+        self._check_from(payload)
+        return self._write("/v1/emails/send", payload, idempotency_key)
+
+    def draft_email(self, payload: Dict[str, Any],
+                    idempotency_key: Optional[str] = None) -> Dict[str, Any]:
+        """POST /v1/emails/draft — brouillon dans la boîte connectée de `from`, RIEN
+        n'est envoyé. Scope `emails:create`. Même corps que `send_email`.
+
+        Seul `from` est requis, mais un brouillon qui ne porte QUE `from` est refusé
+        (400) : il faut au moins un `to`/`cc`/`bcc`/`subject`/`messageBody.content`/
+        `attachments`. On laisse ce refus à l'amont — lui seul connaît la règle exacte.
+        """
+        self._check_from(payload)
+        return self._write("/v1/emails/draft", payload, idempotency_key)
 
     # --- types d'objets -----------------------------------------------------
 
