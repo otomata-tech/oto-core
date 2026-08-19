@@ -96,6 +96,8 @@ _ENDPOINTS = [
     ("meeting_definitions", (), "GET", "/v1/meetings/definitions"),
     ("list_emails", (), "GET", "/v1/emails"),
     ("get_email", ("e1",), "GET", "/v1/emails/e1"),
+    ("send_email", ({"from": "a@b.test", "to": ["c@d.test"]},), "POST", "/v1/emails/send"),
+    ("draft_email", ({"from": "a@b.test", "subject": "x"},), "POST", "/v1/emails/draft"),
     ("list_object_types", (), "GET", "/v1/objects"),
     ("object_definitions", ("deal",), "GET", "/v1/objects/deal/definitions"),
 ]
@@ -114,9 +116,34 @@ def test_updates_are_POST_because_the_api_has_no_put_or_patch(capture):
     assert capture["method"] == "POST"
 
 
-def test_the_client_never_exposes_a_send_email_path():
-    """L'envoi est hors périmètre par DÉCISION : qu'aucune méthode ne le rouvre."""
-    assert not [m for m in dir(lf.LightfieldClient) if "send" in m.lower()]
+# --- envoi d'email -----------------------------------------------------------
+# Le garde-fou « aucune méthode d'envoi » a été RETIRÉ sciemment : l'envoi est
+# autorisé depuis l'arbitrage mainteneur du 19/08/2026. Ce qui le remplace, ce n'est
+# pas rien — ce sont les conditions qui rendaient l'arbitrage acceptable.
+
+@pytest.mark.parametrize("missing", [{}, {"from": ""}, {"from": "   "},
+                                     {"to": ["c@d.test"]}])
+def test_an_email_without_a_connected_sender_never_leaves_the_process(capture, missing):
+    """Le second verrou de l'arbitrage : l'envoi part d'une boîte CONNECTÉE par le
+    propriétaire de la clé. Sans `from`, on n'appelle même pas."""
+    with pytest.raises(ValueError, match="connect"):
+        _client().send_email(missing)
+    with pytest.raises(ValueError, match="connect"):
+        _client().draft_email(missing)
+    assert capture["calls"] == []
+
+
+def test_sending_carries_an_idempotency_key_so_a_replay_does_not_send_twice(capture):
+    """Sur le seul geste qui atteint une personne réelle, le doublon n'est pas une
+    ligne en trop : c'est un deuxième email reçu."""
+    _client().send_email({"from": "a@b.test", "to": ["c@d.test"]})
+    assert capture["kwargs"]["headers"]["Idempotency-Key"]
+
+
+def test_a_draft_is_a_separate_path_from_a_send(capture):
+    """Rien ne doit pouvoir confondre « préparer » et « envoyer »."""
+    _client().draft_email({"from": "a@b.test", "subject": "x"})
+    assert capture["url"].endswith("/v1/emails/draft")
 
 
 # --- pagination -------------------------------------------------------------
