@@ -6,7 +6,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 from email.mime.base import MIMEBase
 from email import encoders
-from email.utils import parseaddr
+from email.utils import getaddresses, parseaddr
 from pathlib import Path
 from typing import Optional
 
@@ -32,6 +32,22 @@ def _markdown_to_html_fragment(text: str) -> str:
         extensions=['tables', 'fenced_code', 'sane_lists', 'attr_list'],
         output_format='html',
     )
+
+
+def _recipients(header: str, exclude: str = "") -> str:
+    """Les adresses d'un en-tête, en liste, moins `exclude`.
+
+    ⚠️ Ne PAS utiliser `parseaddr` ici : il ne lit qu'une adresse et rend
+    `('', '')` sur `To: a@x, b@y` — un fil à plusieurs destinataires devenait
+    alors « Cannot determine reply recipient ».
+    """
+    # `if "@" in a` : sur un en-tête sans adresse réelle (« Nom Sans Adresse »),
+    # getaddresses rend [('', 'Nom')] — le laisser passer enverrait vers « Nom »
+    # au lieu de lever le garde-fou d'appel.
+    addrs = [a for _, a in getaddresses([header]) if a and "@" in a]
+    if exclude:
+        addrs = [a for a in addrs if a.lower() != exclude.lower()]
+    return ", ".join(addrs)
 
 
 class GmailClientError(Exception):
@@ -246,11 +262,12 @@ class GmailClient:
         my_email = profile['emailAddress']
 
         if reply_to_header:
-            reply_to = parseaddr(reply_to_header)[1]
+            reply_to = _recipients(reply_to_header)
         elif my_email.lower() in from_addr.lower():
-            reply_to = parseaddr(to_addr)[1]
+            # notre propre message : on relance le fil vers TOUS ses destinataires
+            reply_to = _recipients(to_addr)
         else:
-            reply_to = parseaddr(from_addr)[1]
+            reply_to = _recipients(from_addr)
 
         if not reply_to:
             raise GmailClientError(f"Cannot determine reply recipient (from={from_addr!r}, to={to_addr!r})")
@@ -365,11 +382,12 @@ class GmailClient:
         my_email = profile['emailAddress']
 
         if reply_to_header:
-            reply_to = parseaddr(reply_to_header)[1]
+            reply_to = _recipients(reply_to_header)
         elif my_email.lower() in from_addr.lower():
-            reply_to = parseaddr(to_addr)[1]
+            # notre propre message : on relance le fil vers TOUS ses destinataires
+            reply_to = _recipients(to_addr)
         else:
-            reply_to = parseaddr(from_addr)[1]
+            reply_to = _recipients(from_addr)
 
         if not reply_to:
             raise GmailClientError(f"Cannot determine reply recipient (from={from_addr!r}, to={to_addr!r})")
