@@ -226,6 +226,55 @@ def test_publish_items(c, calls):
     assert calls[-1]["json"] == {"itemIds": ["item_1", "item_2"]}
 
 
+# --- Webhooks ------------------------------------------------------------------
+
+def test_list_webhooks(c, calls):
+    c.list_webhooks()
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/webhooks"
+
+
+def test_get_webhook_has_no_site_id_in_path(c, calls):
+    """get/delete sont scopés au webhook seul (pas de site_id dans le chemin) —
+    contrairement à list/create, scopés au site. Vérifié live 2026-08-20."""
+    c.get_webhook("wh_1")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/webhooks/wh_1"
+
+
+def test_create_webhook_without_filter(c, calls):
+    c.create_webhook("collection_item_created", "https://example.com/hook")
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/webhooks"
+    assert calls[-1]["json"] == {
+        "triggerType": "collection_item_created", "url": "https://example.com/hook"}
+
+
+def test_create_webhook_with_filter(c, calls):
+    c.create_webhook("form_submission", "https://example.com/hook",
+                     filter={"name": "Contact Form"})
+    assert calls[-1]["json"] == {
+        "triggerType": "form_submission", "url": "https://example.com/hook",
+        "filter": {"name": "Contact Form"}}
+
+
+def test_delete_webhook(c, calls):
+    c.delete_webhook("wh_1")
+    assert calls[-1]["method"] == "DELETE"
+    assert calls[-1]["url"] == f"{BASE}/webhooks/wh_1"
+
+
+def test_webhook_trigger_types_match_confirmed_doc_enum():
+    assert webflow_client.WebflowClient.WEBHOOK_TRIGGER_TYPES == {
+        "form_submission", "site_publish",
+        "page_created", "page_metadata_updated", "page_deleted",
+        "ecomm_new_order", "ecomm_order_changed", "ecomm_inventory_changed",
+        "collection_item_created", "collection_item_changed",
+        "collection_item_deleted", "collection_item_published",
+        "collection_item_unpublished", "comment_created",
+    }
+
+
 # --- Errors / rate limit ------------------------------------------------------
 
 def test_raises_on_4xx(monkeypatch, c):

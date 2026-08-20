@@ -160,3 +160,46 @@ class WebflowClient:
             "POST", f"collections/{collection_id}/items/publish",
             json={"itemIds": item_ids},
         )
+
+    # --- Webhooks ---
+    #
+    # Surface RÉELLE de l'API (vérifiée live 2026-08-20, pas seulement contre la
+    # doc) : list + create sont scopés au SITE (`/sites/{id}/webhooks`), get +
+    # delete sont scopés au WEBHOOK seul (`/webhooks/{id}`, pas de site_id dans
+    # le chemin). AUCUN endpoint update/PATCH n'existe — reconfigurer un webhook
+    # est delete + create. `filter` n'est accepté QUE pour
+    # triggerType="form_submission" (400 `incompatible_webhook_filter` sinon,
+    # confirmé live) — validé côté client pour épargner l'aller-retour.
+    #
+    # `secretKey` n'est renvoyé QU'À LA CRÉATION (absent de get/list, confirmé
+    # live) — sers-toi-en pour vérifier les signatures `x-webflow-signature`
+    # (HMAC-SHA256 de `f"{timestamp}:{body}"`), Webflow ne le remontre jamais.
+
+    WEBHOOK_TRIGGER_TYPES = frozenset({
+        "form_submission", "site_publish",
+        "page_created", "page_metadata_updated", "page_deleted",
+        "ecomm_new_order", "ecomm_order_changed", "ecomm_inventory_changed",
+        "collection_item_created", "collection_item_changed",
+        "collection_item_deleted", "collection_item_published",
+        "collection_item_unpublished", "comment_created",
+    })
+
+    def list_webhooks(self) -> List[Dict]:
+        return self._request(
+            "GET", f"sites/{self.site_id}/webhooks").get("webhooks", [])
+
+    def get_webhook(self, webhook_id: str) -> Dict:
+        return self._request("GET", f"webhooks/{webhook_id}")
+
+    def create_webhook(self, trigger_type: str, url: str,
+                        filter: Optional[Dict] = None) -> Dict:
+        """`filter` (form_submission uniquement) = `{"name": "<form name>"}`.
+        La réponse porte `secretKey` en clair — UNE seule fois."""
+        body: Dict[str, Any] = {"triggerType": trigger_type, "url": url}
+        if filter is not None:
+            body["filter"] = filter
+        return self._request(
+            "POST", f"sites/{self.site_id}/webhooks", json=body)
+
+    def delete_webhook(self, webhook_id: str) -> None:
+        self._request("DELETE", f"webhooks/{webhook_id}")
