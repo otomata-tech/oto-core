@@ -561,6 +561,10 @@ class ApolloClient:
         if not contact_ids and not label_names:
             raise ValueError("contact_ids ou label_names requis (au moins un des deux)")
         params: Dict[str, Any] = {
+            # `emailer_campaign_id` en DOUBLE du segment de chemin — pas redondant,
+            # vérifié en LIVE (compte Tulina, 2026-08-20) : sans lui, 422 « Please
+            # specify a emailer_campaign_id and send_email_from_email_account_id »
+            # MÊME avec l'id déjà dans l'URL.
             "emailer_campaign_id": sequence_id,
             "send_email_from_email_account_id": send_email_from_email_account_id,
         }
@@ -770,6 +774,12 @@ class ApolloClient:
             date_range_mode: `"due_at"` ou `"completed_at"`
             date_min / date_max: bornes `YYYY-MM-DD`
             per_page: ≤100. page: numéro de page
+
+        ⚠️ `page`/`per_page` sont doc-claimed, pas vérifiés : le compte de test
+        (Tulina, 2026-08-20) avait 0 email envoyé — la requête rend 200 dans les
+        deux cas, sans doublon d'un résultat NON VIDE pour confirmer qu'ils sont
+        honorés (vs. ignorés en silence, comme `organization_domain` l'a été
+        ailleurs dans ce fichier).
 
         Returns:
             Dict avec `emailer_messages`, `emailer_steps`
