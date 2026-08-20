@@ -324,6 +324,99 @@ def test_delete_form_submission(c, calls):
     assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/form_submissions/sub_1"
 
 
+# --- Pages -----------------------------------------------------------------
+
+def test_list_pages(c, calls):
+    c.list_pages()
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/pages"
+    assert calls[-1]["params"] == {"offset": 0, "limit": 100}
+
+
+def test_list_pages_with_locale(c, calls):
+    c.list_pages(locale_id="loc_fr")
+    assert calls[-1]["params"]["localeId"] == "loc_fr"
+
+
+def test_get_page_has_no_site_id_in_path(c, calls):
+    c.get_page("page_1")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/pages/page_1"
+
+
+def test_update_page_metadata_only(c, calls):
+    c.update_page("page_1", title="New title", slug="new-slug",
+                  seo={"title": "SEO title"},
+                  open_graph={"title": "OG title"})
+    assert calls[-1]["method"] == "PUT"
+    assert calls[-1]["url"] == f"{BASE}/pages/page_1"
+    assert calls[-1]["json"] == {
+        "title": "New title", "slug": "new-slug",
+        "seo": {"title": "SEO title"}, "openGraph": {"title": "OG title"}}
+
+
+def test_update_page_partial_fields_only(c, calls):
+    c.update_page("page_1", title="Only title")
+    assert calls[-1]["json"] == {"title": "Only title"}
+
+
+def test_update_page_with_locale_param(c, calls):
+    c.update_page("page_1", title="X", locale_id="loc_fr")
+    assert calls[-1]["params"] == {"localeId": "loc_fr"}
+
+
+def test_get_page_content_no_locale_required(c, calls):
+    """Lecture du contenu marche SANS locale (primaire incluse) —
+    contrairement à l'écriture, restreinte aux locales secondaires."""
+    c.get_page_content("page_1")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/pages/page_1/dom"
+    assert "localeId" not in calls[-1]["params"]
+
+
+def test_get_page_content_with_locale(c, calls):
+    c.get_page_content("page_1", locale_id="loc_fr")
+    assert calls[-1]["params"]["localeId"] == "loc_fr"
+
+
+def test_update_page_content_requires_locale_id(c):
+    with pytest.raises(ValueError, match="locale_id"):
+        c.update_page_content("page_1", [{"nodeId": "n1", "text": "<p>x</p>"}],
+                              locale_id=None)
+
+
+def test_update_page_content_requires_locale_id_empty_string(c):
+    with pytest.raises(ValueError, match="locale_id"):
+        c.update_page_content("page_1", [{"nodeId": "n1", "text": "<p>x</p>"}],
+                              locale_id="")
+
+
+def test_update_page_content_with_secondary_locale(c, calls):
+    nodes = [{"nodeId": "n1", "text": "<p>Bonjour</p>"}]
+    c.update_page_content("page_1", nodes, locale_id="loc_fr_secondary")
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/pages/page_1/dom"
+    assert calls[-1]["json"] == {"nodes": nodes}
+    assert calls[-1]["params"] == {"localeId": "loc_fr_secondary"}
+
+
+def test_publish_site_requires_a_target(c):
+    with pytest.raises(ValueError, match="custom_domains|publish_to_webflow_subdomain"):
+        c.publish_site()
+
+
+def test_publish_site_webflow_subdomain(c, calls):
+    c.publish_site(publish_to_webflow_subdomain=True)
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/publish"
+    assert calls[-1]["json"] == {"publishToWebflowSubdomain": True}
+
+
+def test_publish_site_custom_domains(c, calls):
+    c.publish_site(custom_domains=["dom_1", "dom_2"])
+    assert calls[-1]["json"] == {"customDomains": ["dom_1", "dom_2"]}
+
+
 # --- Errors / rate limit ------------------------------------------------------
 
 def test_raises_on_4xx(monkeypatch, c):

@@ -1,8 +1,11 @@
 """Webflow Data API v2 Client — https://developers.webflow.com/data/reference
 
-Scope (v1): CMS only — site (read), collections (read), items (CRUD on the
-*staged* items, i.e. draft/unpublished by default) + publish. No pages,
-assets, forms, or ecommerce endpoints here.
+Scope: CMS (site/collections/items/publish), webhooks, forms/submissions,
+and pages (metadata + read-only static content + site-level publish). No
+assets, ecommerce, comments, or custom code — custom code injects arbitrary
+JS into every visitor's browser (site- or page-wide), a categorically
+different blast radius than data CRUD; deliberately left out until there's
+a concrete need.
 
 Auth = Webflow **Site API token** (generated per-site in Site Settings →
 Apps & Integrations → API access, scoped with `cms:read`/`cms:write`/
@@ -253,3 +256,116 @@ class WebflowClient:
     def delete_form_submission(self, submission_id: str) -> None:
         self._request(
             "DELETE", f"sites/{self.site_id}/form_submissions/{submission_id}")
+
+    # --- Pages ---
+    #
+    # Deux surfaces bien distinctes, vérifiées contre la doc source
+    # (`pages-and-components/pages/*` — PAS `pages/*`, qui 404) :
+    #
+    # (1) MÉTADONNÉES (title/slug/seo/openGraph) — read+write, AUCUNE
+    #     restriction de locale. `list` est scopée site, `get`/`update` sont
+    #     scopées à la page seule (pas de site_id dans le chemin).
+    #
+    # (2) CONTENU STATIQUE (les text nodes — titres/paragraphes de la page) —
+    #     `get_page_content` (lecture, `/pages/{id}/dom`) fonctionne SANS
+    #     restriction (n'importe quelle locale, y compris la primaire/
+    #     défaut). ⚠️ MAIS `update_page_content` (écriture, même endpoint en
+    #     POST) est réservé aux locales SECONDAIRES — confirmé verbatim
+    #     contre la doc : « This endpoint updates content on a static page in
+    #     secondary locales » / « Ensure that the specified localeId is a
+    #     valid secondary locale for the site otherwise the request will
+    #     fail. » Sur un site MONO-locale (pas de locale secondaire
+    #     configurée — le cas courant), il n'existe donc AUCUN chemin API
+    #     pour éditer le corps d'une page statique : seule la lecture marche
+    #     pleinement. `update_page_content` lève `ValueError` si appelée sans
+    #     `locale_id` plutôt que de laisser un 400 Webflow opaque remonter —
+    #     ce n'est pas un oubli de paramètre, c'est une contrainte structurelle
+    #     de l'API qu'il faut nommer.
+
+    def list_pages(self, *, offset: int = 0, limit: int = 100,
+                    locale_id: Optional[str] = None) -> Dict:
+        params: Dict[str, Any] = {"offset": offset, "limit": min(limit, 100)}
+        if locale_id:
+            params["localeId"] = locale_id
+        return self._request(
+            "GET", f"sites/{self.site_id}/pages", params=params)
+
+    def get_page(self, page_id: str) -> Dict:
+        """Métadonnées d'UNE page (title/slug/seo/openGraph) — pas son contenu
+        (voir `get_page_content`)."""
+        return self._request("GET", f"pages/{page_id}")
+
+    def update_page(self, page_id: str, *, title: Optional[str] = None,
+                     slug: Optional[str] = None, seo: Optional[Dict] = None,
+                     open_graph: Optional[Dict] = None,
+                     locale_id: Optional[str] = None) -> Dict:
+        """Écrit UNIQUEMENT les métadonnées (title/slug/seo/openGraph) — jamais
+        le contenu de la page (voir la restriction locale de
+        `update_page_content`)."""
+        body: Dict[str, Any] = {}
+        if title is not None:
+            body["title"] = title
+        if slug is not None:
+            body["slug"] = slug
+        if seo is not None:
+            body["seo"] = seo
+        if open_graph is not None:
+            body["openGraph"] = open_graph
+        params = {"localeId": locale_id} if locale_id else {}
+        return self._request(
+            "PUT", f"pages/{page_id}", json=body, params=params)
+
+    def get_page_content(self, page_id: str, *, offset: int = 0,
+                          limit: int = 100,
+                          locale_id: Optional[str] = None) -> Dict:
+        """Text nodes de la page — LECTURE seule fonctionne sur n'importe
+        quelle locale (y compris la primaire), contrairement à l'écriture."""
+        params: Dict[str, Any] = {"offset": offset, "limit": min(limit, 100)}
+        if locale_id:
+            params["localeId"] = locale_id
+        return self._request(
+            "GET", f"pages/{page_id}/dom", params=params)
+
+    def update_page_content(self, page_id: str, nodes: List[Dict], *,
+                             locale_id: str) -> Dict:
+        """⚠️ `locale_id` DOIT être une locale SECONDAIRE du site (pas la
+        primaire) — restriction Webflow, pas une omission de ce client :
+        « Ensure that the specified localeId is a valid secondary locale for
+        the site otherwise the request will fail. » Aucune valeur par défaut
+        n'est devinée : un site sans locale secondaire configurée n'a AUCUN
+        moyen d'écrire le contenu d'une page via l'API — seule sa lecture
+        (`get_page_content`) fonctionne alors.
+
+        `nodes` = liste de `{"nodeId": ..., "text": "<html>"}` (ou la forme
+        propre au type de node — component instance/select/text input/
+        submit/search button, cf. doc)."""
+        if not locale_id:
+            raise ValueError(
+                "update_page_content requiert locale_id — Webflow ne permet "
+                "d'écrire le contenu statique d'une page QUE sur une locale "
+                "SECONDAIRE du site (jamais la primaire/défaut). Un site "
+                "mono-locale (sans locale secondaire configurée) n'a aucun "
+                "moyen d'éditer le corps d'une page via l'API — seule sa "
+                "lecture (get_page_content) fonctionne alors.")
+        return self._request(
+            "POST", f"pages/{page_id}/dom", json={"nodes": nodes},
+            params={"localeId": locale_id})
+
+    def publish_site(self, *, custom_domains: Optional[List[str]] = None,
+                      publish_to_webflow_subdomain: bool = False) -> Dict:
+        """Publie le SITE ENTIER (toutes les pages) — à distinguer de
+        `publish_items` (items CMS seuls). Rate-limité par Webflow à 1
+        publish/minute. Au moins un des deux arguments doit désigner une
+        cible réelle."""
+        body: Dict[str, Any] = {}
+        if custom_domains:
+            body["customDomains"] = custom_domains
+        if publish_to_webflow_subdomain:
+            body["publishToWebflowSubdomain"] = True
+        if not body:
+            raise ValueError(
+                "publish_site requiert custom_domains et/ou "
+                "publish_to_webflow_subdomain=True — au moins une cible de "
+                "publication doit être désignée.")
+        return self._request(
+            "POST", f"sites/{self.site_id}/publish", json=body)
