@@ -5,12 +5,15 @@ Scope (v1): CMS only — site (read), collections (read), items (CRUD on the
 assets, forms, or ecommerce endpoints here.
 
 Auth = Webflow **Site API token** (generated per-site in Site Settings →
-Apps & Integrations → API access, scoped with `cms:read`/`cms:write`).
-Site tokens are bound to exactly one site (confirmed against
+Apps & Integrations → API access, scoped with `cms:read`/`cms:write`/
+`sites:read`). Site tokens are bound to exactly one site (confirmed against
 developers.webflow.com/data/v2.0.0/reference/authentication/site-token —
-"Site tokens are created per site") — so `site_id` is a constructor arg,
-not a per-call parameter, and there is no multi-site discovery endpoint
-worth calling per request.
+"Site tokens are created per site"), so the caller never needs to know or
+paste a `site_id`: it's resolved lazily on first use via `GET /sites`
+(requires the `sites:read` scope) and cached — that call returns exactly one
+site for a genuine Site token. An explicit `site_id` can still be passed to
+the constructor to skip that resolution (e.g. tests, or a future token type
+that spans sites), but it is optional everywhere.
 
 Webflow's item endpoints natively support batching (an `items` array in one
 HTTP call) for create/update/delete — unlike e.g. Folk, this client does NOT
@@ -33,7 +36,35 @@ class WebflowClient:
 
     def __init__(self, api_key: str = None, site_id: str = None):
         self.api_key = api_key or require_secret("WEBFLOW_API_KEY")
-        self.site_id = site_id or require_secret("WEBFLOW_SITE_ID")
+        self._site_id = site_id
+
+    @property
+    def site_id(self) -> str:
+        """Résolu paresseusement via `GET /sites` si non fourni au
+        constructeur, puis mis en cache — un Site API token Webflow est bound
+        à UN site, donc rien à saisir : le token le sait déjà. Lève
+        `ValueError` (pas `UpstreamHTTPError` : ce n'est pas un refus HTTP)
+        si le token voit zéro ou plusieurs sites — un token de workspace/OAuth
+        passé ici par erreur ne doit jamais faire deviner LEQUEL des sites
+        visés est le bon."""
+        if self._site_id is None:
+            self._site_id = self._resolve_site_id()
+        return self._site_id
+
+    def _resolve_site_id(self) -> str:
+        sites = self._request("GET", "sites").get("sites", [])
+        if len(sites) == 1:
+            return sites[0]["id"]
+        if not sites:
+            raise ValueError(
+                "ce token Webflow n'a accès à aucun site — vérifie qu'il a "
+                "été généré avec le scope sites:read et qu'il n'a pas été "
+                "révoqué.")
+        raise ValueError(
+            f"ce token Webflow a accès à {len(sites)} sites — attendu "
+            "exactement 1 pour un Site API token (généré depuis Site "
+            "Settings → Apps & Integrations → API access DU site voulu, pas "
+            f"un token de workspace). Sites vus : {[s.get('id') for s in sites]}.")
 
     def _request(self, method: str, endpoint: str, **kwargs) -> Any:
         url = f"{self.BASE_URL}/{endpoint}"

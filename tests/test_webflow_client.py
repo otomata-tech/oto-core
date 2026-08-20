@@ -52,6 +52,68 @@ def test_constructor_requires_no_env_when_args_given():
     assert c.site_id == "s"
 
 
+# --- site_id lazy resolution (no site_id passed to the constructor) ---------
+
+def test_site_id_resolves_lazily_via_sites_list(monkeypatch):
+    captured = []
+
+    def fake_request(method, url, headers=None, **kwargs):
+        captured.append(url)
+        if url == f"{BASE}/sites":
+            return _Resp({"sites": [{"id": "site_resolved"}]})
+        return _Resp({"id": "site_resolved"})
+
+    monkeypatch.setattr(webflow_client.requests, "request", fake_request)
+    c = WebflowClient(api_key="k")
+    assert c.get_site() == {"id": "site_resolved"}
+    assert captured == [f"{BASE}/sites", f"{BASE}/sites/site_resolved"]
+
+
+def test_site_id_resolution_is_cached(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_request(method, url, headers=None, **kwargs):
+        if url == f"{BASE}/sites":
+            calls["n"] += 1
+            return _Resp({"sites": [{"id": "site_resolved"}]})
+        return _Resp({"collections": []})
+
+    monkeypatch.setattr(webflow_client.requests, "request", fake_request)
+    c = WebflowClient(api_key="k")
+    c.list_collections()
+    c.list_collections()
+    assert calls["n"] == 1
+
+
+def test_site_id_zero_sites_raises_value_error(monkeypatch):
+    monkeypatch.setattr(
+        webflow_client.requests, "request",
+        lambda method, url, headers=None, **kwargs: _Resp({"sites": []}))
+    c = WebflowClient(api_key="k")
+    with pytest.raises(ValueError, match="aucun site"):
+        c.get_site()
+
+
+def test_site_id_multiple_sites_raises_value_error(monkeypatch):
+    monkeypatch.setattr(
+        webflow_client.requests, "request",
+        lambda method, url, headers=None, **kwargs: _Resp(
+            {"sites": [{"id": "a"}, {"id": "b"}]}))
+    c = WebflowClient(api_key="k")
+    with pytest.raises(ValueError, match="2 sites"):
+        c.get_site()
+
+
+def test_explicit_site_id_skips_resolution(monkeypatch):
+    def fake_request(method, url, headers=None, **kwargs):
+        assert url != f"{BASE}/sites", "ne doit jamais résoudre — site_id est déjà fourni"
+        return _Resp({"id": SITE_ID})
+
+    monkeypatch.setattr(webflow_client.requests, "request", fake_request)
+    c = WebflowClient(api_key="k", site_id=SITE_ID)
+    c.get_site()
+
+
 # --- Site ------------------------------------------------------------------
 
 def test_get_site(c, calls):
