@@ -203,3 +203,53 @@ class WebflowClient:
 
     def delete_webhook(self, webhook_id: str) -> None:
         self._request("DELETE", f"webhooks/{webhook_id}")
+
+    # --- Forms & submissions ---
+    #
+    # Forme RÉELLE de l'API (vérifiée contre la doc source — `forms/forms/*` et
+    # `forms/form-submissions/*`, pas `forms/submissions/*` qui 404) : lister
+    # les FORMULAIRES est scopé site (`/sites/{id}/forms`), lister les
+    # SOUMISSIONS d'UN formulaire est scopé aux deux (`/sites/{id}/forms/
+    # {form_id}/submissions`), mais get/patch/delete D'UNE soumission ne
+    # portent PLUS `form_id` dans le chemin (`/sites/{id}/form_submissions/
+    # {submission_id}` — le tiret bas, pas le slash, contrairement à list).
+    # AUCUNE création par API — une soumission n'existe que si un visiteur
+    # remplit le formulaire côté site public.
+    #
+    # `update_submission` ne réécrit PAS les données soumises (le contenu du
+    # formulaire n'est pas éditable après coup) : `formSubmissionData` ne
+    # touche QUE les champs cachés (hidden fields) déclarés au schéma du
+    # formulaire — un champ non déclaré comme hidden y est un no-op silencieux
+    # côté Webflow, pas une erreur (pas de garde client possible sans le
+    # schéma du formulaire en main : passer par `get_form` d'abord si le
+    # champ cible doit être vérifié).
+
+    def list_forms(self, *, offset: int = 0, limit: int = 100) -> Dict:
+        return self._request(
+            "GET", f"sites/{self.site_id}/forms",
+            params={"offset": offset, "limit": min(limit, 100)})
+
+    def get_form(self, form_id: str) -> Dict:
+        return self._request("GET", f"forms/{form_id}")
+
+    def list_form_submissions(self, form_id: str, *, offset: int = 0,
+                               limit: int = 100) -> Dict:
+        return self._request(
+            "GET", f"sites/{self.site_id}/forms/{form_id}/submissions",
+            params={"offset": offset, "limit": min(limit, 100)})
+
+    def get_form_submission(self, submission_id: str) -> Dict:
+        return self._request(
+            "GET", f"sites/{self.site_id}/form_submissions/{submission_id}")
+
+    def update_form_submission(self, submission_id: str,
+                                form_submission_data: Dict) -> Dict:
+        """`form_submission_data` touche UNIQUEMENT les hidden fields déclarés
+        au schéma du formulaire — jamais les données soumises par le visiteur."""
+        return self._request(
+            "PATCH", f"sites/{self.site_id}/form_submissions/{submission_id}",
+            json={"formSubmissionData": form_submission_data})
+
+    def delete_form_submission(self, submission_id: str) -> None:
+        self._request(
+            "DELETE", f"sites/{self.site_id}/form_submissions/{submission_id}")

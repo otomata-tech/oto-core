@@ -275,6 +275,55 @@ def test_webhook_trigger_types_match_confirmed_doc_enum():
     }
 
 
+# --- Forms & submissions --------------------------------------------------------
+
+def test_list_forms(c, calls):
+    c.list_forms()
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/forms"
+    assert calls[-1]["params"] == {"offset": 0, "limit": 100}
+
+
+def test_list_forms_caps_limit_at_100(c, calls):
+    c.list_forms(limit=500)
+    assert calls[-1]["params"]["limit"] == 100
+
+
+def test_get_form(c, calls):
+    c.get_form("form_1")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/forms/form_1"
+
+
+def test_list_form_submissions_scoped_to_site_and_form(c, calls):
+    """List est le SEUL endpoint form-submissions qui porte form_id dans le
+    chemin — get/update/delete ne le portent PAS (site_id seul), vérifié
+    contre la doc source (forms/form-submissions/*)."""
+    c.list_form_submissions("form_1")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/forms/form_1/submissions"
+    assert calls[-1]["params"] == {"offset": 0, "limit": 100}
+
+
+def test_get_form_submission_has_no_form_id_in_path(c, calls):
+    c.get_form_submission("sub_1")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/form_submissions/sub_1"
+
+
+def test_update_form_submission_hidden_fields_only(c, calls):
+    c.update_form_submission("sub_1", {"lead_score": "hot"})
+    assert calls[-1]["method"] == "PATCH"
+    assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/form_submissions/sub_1"
+    assert calls[-1]["json"] == {"formSubmissionData": {"lead_score": "hot"}}
+
+
+def test_delete_form_submission(c, calls):
+    c.delete_form_submission("sub_1")
+    assert calls[-1]["method"] == "DELETE"
+    assert calls[-1]["url"] == f"{BASE}/sites/{SITE_ID}/form_submissions/sub_1"
+
+
 # --- Errors / rate limit ------------------------------------------------------
 
 def test_raises_on_4xx(monkeypatch, c):
