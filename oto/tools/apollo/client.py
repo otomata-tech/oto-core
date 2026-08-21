@@ -352,3 +352,596 @@ class ApolloClient:
             Job postings list
         """
         return self._request("GET", f"organizations/{org_id}/job_postings")
+
+    # ------------------------------------------------------------------
+    # Email accounts & schedules (prérequis en lecture des séquences/emails :
+    # sans un `id` d'ici, `create_sequence`/`add_contacts_to_sequence` n'ont
+    # rien à passer en `emailer_schedule_id`/`send_email_from_email_account_id`)
+    # ------------------------------------------------------------------
+
+    def list_email_accounts(self) -> Dict[str, Any]:
+        """
+        List the mailboxes connected to this Apollo account (0 crédit).
+
+        Returns:
+            Dict avec `email_accounts` — c'est ici qu'on trouve l'`id` à passer
+            en `send_email_from_email_account_id` à `add_contacts_to_sequence`.
+        """
+        return self._request("GET", "email_accounts")
+
+    def list_email_schedules(self) -> Dict[str, Any]:
+        """
+        List the send schedules configured on this team (0 crédit).
+
+        Returns:
+            Dict avec `emailer_schedules` — c'est ici qu'on trouve l'`id` à
+            passer en `emailer_schedule_id` à `create_sequence` (requis, sans
+            lui la création échoue).
+        """
+        return self._request("GET", "emailer_schedules")
+
+    # ------------------------------------------------------------------
+    # Sequences
+    #
+    # ⚠️ Deux familles de chemin, PAS une incohérence : create/update utilisent
+    # `/sequences[...]` (REST plus récent), tout le reste — search, contacts,
+    # activate/deactivate/archive — reste sur l'objet legacy `/emailer_campaigns`.
+    # Vérifié endpoint par endpoint dans la doc Apollo (2026-08-20) ; pas encore
+    # rejoué en vrai (pas de clé dans cet environnement) — à confirmer au premier
+    # run réel plutôt qu'à supposer une symétrie qui n'existe pas.
+    # ------------------------------------------------------------------
+
+    def search_sequences(
+        self,
+        name: str = None,
+        per_page: int = 25,
+        page: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Search sequences by name (0 crédit).
+
+        Args:
+            name: mots-clés, doit matcher une PARTIE du nom (`q_name` côté API)
+            per_page: résultats par page
+            page: numéro de page
+
+        Returns:
+            Dict avec `emailer_campaigns` (liste) et `pagination`
+        """
+        data: Dict[str, Any] = {"per_page": per_page, "page": page}
+        if name:
+            data["q_name"] = name
+        return self._request("POST", "emailer_campaigns/search", json=data)
+
+    def create_sequence(
+        self,
+        name: str,
+        emailer_schedule_id: str,
+        active: bool = False,
+        label_names: List[str] = None,
+        folder_id: str = None,
+        max_emails_per_day: int = None,
+        emailer_steps: List[Dict[str, Any]] = None,
+        **extra: Any,
+    ) -> Dict[str, Any]:
+        """
+        Create a sequence (0 crédit — le coût est dans l'envoi, pas la création).
+
+        Args:
+            name: nom de la séquence
+            emailer_schedule_id: id d'un planning d'envoi — REQUIS par l'API,
+                obtenu via `list_email_schedules` (aucun défaut implicite documenté)
+            active: activer immédiatement (défaut False — préférer `activate_sequence`
+                une fois les étapes/templates relus)
+            label_names: labels à appliquer (créés si absents)
+            folder_id: id de dossier Apollo
+            max_emails_per_day: plafond d'envoi quotidien
+            emailer_steps: définition des étapes (voir doc Apollo — structure
+                imbriquée, non validée localement)
+            **extra: autres champs documentés (`sequence_by_exact_daytime`,
+                `mark_finished_if_reply`, `mark_paused_if_ooo`, etc.) passés tels quels
+
+        Returns:
+            Dict avec `emailer_campaign`, `emailer_steps`, `emailer_touches`, `emailer_templates`
+        """
+        if not (name or "").strip():
+            raise ValueError("name requis pour créer une séquence")
+        if not (emailer_schedule_id or "").strip():
+            raise ValueError(
+                "emailer_schedule_id requis — obtiens-le via list_email_schedules(), "
+                "l'API refuse la création sans planning d'envoi")
+        data: Dict[str, Any] = {
+            "name": name,
+            "emailer_schedule_id": emailer_schedule_id,
+            "active": active,
+        }
+        if label_names:
+            data["label_names"] = label_names
+        if folder_id:
+            data["folder_id"] = folder_id
+        if max_emails_per_day is not None:
+            data["max_emails_per_day"] = max_emails_per_day
+        if emailer_steps:
+            data["emailer_steps"] = emailer_steps
+        data.update(extra)
+        return self._request("POST", "sequences", json=data)
+
+    def update_sequence(self, sequence_id: str, **fields: Any) -> Dict[str, Any]:
+        """
+        Update a sequence (0 crédit). Tous les champs sont optionnels côté API —
+        seuls ceux passés ici sont envoyés.
+
+        Args:
+            sequence_id: id Apollo de la séquence
+            **fields: `name`, `active`, `emailer_schedule_id`, `label_names`,
+                `max_emails_per_day`, `cc_emails`, `bcc_emails`, `emailer_steps`
+                (inclure `id` par step pour MODIFIER, l'omettre pour EN CRÉER une),
+                `sharing_permission`, etc. — voir doc Apollo
+
+        Returns:
+            Séquence mise à jour
+        """
+        if not (sequence_id or "").strip():
+            raise ValueError("sequence_id requis")
+        return self._request("PUT", f"sequences/{sequence_id}", json=fields)
+
+    def activate_sequence(self, sequence_id: str) -> Dict[str, Any]:
+        """
+        Activate a sequence — démarre l'envoi programmé (0 crédit à l'appel,
+        les crédits sont consommés au fil des envois/reveals).
+
+        ⚠️ Échoue en 422 si la séquence est déjà active ou n'a pas d'étape.
+        """
+        if not (sequence_id or "").strip():
+            raise ValueError("sequence_id requis")
+        return self._request("POST", f"emailer_campaigns/{sequence_id}/approve")
+
+    def deactivate_sequence(self, sequence_id: str) -> Dict[str, Any]:
+        """Deactivate a sequence (0 crédit). 422 si déjà inactive."""
+        if not (sequence_id or "").strip():
+            raise ValueError("sequence_id requis")
+        return self._request("POST", f"emailer_campaigns/{sequence_id}/abort")
+
+    def archive_sequence(self, sequence_id: str) -> Dict[str, Any]:
+        """Archive a sequence (0 crédit). Nécessite d'en être propriétaire ou
+        d'avoir un accès partagé « full access »."""
+        if not (sequence_id or "").strip():
+            raise ValueError("sequence_id requis")
+        return self._request("POST", f"emailer_campaigns/{sequence_id}/archive")
+
+    def add_contacts_to_sequence(
+        self,
+        sequence_id: str,
+        send_email_from_email_account_id: str,
+        contact_ids: List[str] = None,
+        label_names: List[str] = None,
+        send_email_from_email_address: str = None,
+        status: str = None,
+        **flags: Any,
+    ) -> Dict[str, Any]:
+        """
+        Enroll contacts in a sequence — l'appel le plus à risque de ce client :
+        il démarre une campagne automatisée MULTI-ÉTAPES vers des personnes réelles,
+        pas un envoi unique. 0 crédit à l'appel (les envois/reveals suivants coûtent).
+
+        Args:
+            sequence_id: id Apollo de la séquence
+            send_email_from_email_account_id: id (ou liste d'ids pour rotation) de
+                la boîte CONNECTÉE qui enverra — REQUIS par l'API, obtenu via
+                `list_email_accounts`. Verrou local ci-dessous, même logique que
+                Lightfield `_check_from` : sans boîte explicite, aucun appel ne part.
+            contact_ids: ids Apollo des contacts (mutuellement substituable à `label_names`)
+            label_names: labels identifiant les contacts à ajouter
+            send_email_from_email_address: adresse précise dans le compte (si multi-alias)
+            status: `"active"` ou `"paused"` à l'ajout
+            **flags: `sequence_no_email`, `sequence_unverified_email`,
+                `sequence_job_change`, `sequence_active_in_other_campaigns`,
+                `sequence_finished_in_other_campaigns`,
+                `sequence_same_company_in_same_campaign`,
+                `contacts_without_ownership_permission`, `add_if_in_queue`,
+                `contact_verification_skipped`, `user_id`, `auto_unpause_at` —
+                tous des garde-fous Apollo à `False`/absent par défaut ; les passer
+                explicitement à `True` pour les lever
+
+        ⚠️ Doc Apollo : 403 « Master API key required » sur cet endpoint — à
+        confirmer avec une clé réelle, pas vérifié depuis cet environnement.
+
+        Returns:
+            Dict avec `contacts` (ajoutés), `skipped_contact_ids` (id → raison),
+            `emailer_campaign`, `emailer_steps`, `emailer_touches`
+        """
+        if not (sequence_id or "").strip():
+            raise ValueError("sequence_id requis")
+        if not send_email_from_email_account_id:
+            raise ValueError(
+                "send_email_from_email_account_id requis — obtiens-le via "
+                "list_email_accounts() : sans boîte CONNECTÉE explicite, l'API "
+                "refuse d'enrôler les contacts (et sans ce verrou, un appel "
+                "partirait sur un défaut qu'on ne contrôle pas)")
+        if not contact_ids and not label_names:
+            raise ValueError("contact_ids ou label_names requis (au moins un des deux)")
+        params: Dict[str, Any] = {
+            # `emailer_campaign_id` en DOUBLE du segment de chemin — pas redondant,
+            # vérifié en LIVE (compte Tulina, 2026-08-20) : sans lui, 422 « Please
+            # specify a emailer_campaign_id and send_email_from_email_account_id »
+            # MÊME avec l'id déjà dans l'URL.
+            "emailer_campaign_id": sequence_id,
+            "send_email_from_email_account_id": send_email_from_email_account_id,
+        }
+        if contact_ids:
+            params["contact_ids[]"] = contact_ids
+        if label_names:
+            params["label_names[]"] = label_names
+        if send_email_from_email_address:
+            params["send_email_from_email_address"] = send_email_from_email_address
+        if status:
+            params["status"] = status
+        params.update(flags)
+        # Query params (doc Apollo), PAS un body JSON — un champ envoyé en `json`
+        # ici serait ignoré en silence, même défaut que `organization_domain`
+        # historique sur `match_person` (cf. commentaire plus haut dans ce fichier).
+        return self._request(
+            "POST", f"emailer_campaigns/{sequence_id}/add_contact_ids", params=params)
+
+    def update_sequence_contact_status(
+        self,
+        emailer_campaign_ids: List[str],
+        contact_ids: List[str],
+        mode: str,
+    ) -> Dict[str, Any]:
+        """
+        Mark-as-finished / remove / stop des contacts dans une ou plusieurs
+        séquences (0 crédit).
+
+        Args:
+            emailer_campaign_ids: ids Apollo des séquences concernées
+            contact_ids: ids Apollo des contacts concernés
+            mode: `"mark_as_finished"` (termine), `"remove"` (retire de la
+                séquence) ou `"stop"` (arrête la progression)
+
+        Returns:
+            Dict avec `entity_progress_job` (job async — pas de statut final ici)
+        """
+        if not emailer_campaign_ids:
+            raise ValueError("emailer_campaign_ids requis")
+        if not contact_ids:
+            raise ValueError("contact_ids requis")
+        if mode not in ("mark_as_finished", "remove", "stop"):
+            raise ValueError('mode doit être "mark_as_finished", "remove" ou "stop"')
+        params = {
+            "emailer_campaign_ids[]": emailer_campaign_ids,
+            "contact_ids[]": contact_ids,
+            "mode": mode,
+        }
+        return self._request(
+            "POST", "emailer_campaigns/remove_or_stop_contact_ids", params=params)
+
+    def get_contact_sequence_activity(
+        self,
+        contact_id: str,
+        sequence_id: str = None,
+        per_page: int = 50,
+    ) -> Dict[str, Any]:
+        """
+        Sequence activity feed for one contact (0 crédit).
+
+        Args:
+            contact_id: id Apollo du contact — doit appartenir à ton équipe (404 sinon)
+            sequence_id: filtre sur une séquence (toutes si omis)
+            per_page: 1-50, les événements les PLUS RÉCENTS (pas une pagination)
+
+        Returns:
+            Dict avec `events` (ordre du plus récent au plus ancien, max `per_page`)
+        """
+        if not (contact_id or "").strip():
+            raise ValueError("contact_id requis")
+        data: Dict[str, Any] = {"contact_id": contact_id, "per_page": per_page}
+        if sequence_id:
+            data["sequence_id"] = sequence_id
+        return self._request("POST", "emailer_campaigns/activity_feed", json=data)
+
+    # ------------------------------------------------------------------
+    # One-off emails
+    #
+    # ⚠️ Brouillon et envoi restent deux appels distincts (create_email_draft
+    # PUIS send_email_now), jamais fusionnés — même choix que Lightfield
+    # (`draft_email`/`send_email`) et pour la même raison : que rien ne
+    # confonde « préparer » et « envoyer ».
+    # ------------------------------------------------------------------
+
+    def create_email_draft(
+        self,
+        contact_id: str = None,
+        subject: str = None,
+        body_html: str = None,
+        recipients: List[Dict[str, str]] = None,
+        in_response_to_emailer_message_id: str = None,
+        emailer_template_id: str = None,
+        attachment_ids: List[str] = None,
+        enable_tracking: bool = None,
+        outreach_task_id: str = None,
+    ) -> Dict[str, Any]:
+        """
+        Create an email draft (ne part PAS — utiliser send_email_now pour envoyer).
+
+        Args:
+            contact_id: id Apollo du destinataire — requis SAUF si
+                `in_response_to_emailer_message_id` est fourni (réponse à un fil)
+            subject / body_html: contenu (l'API assainit le HTML)
+            recipients: `[{"email":, "contact_id":, "recipient_type_cd": "to"|"cc"|"bcc"}]`
+            in_response_to_emailer_message_id: id du message parent (fil de réponse)
+            emailer_template_id: template Apollo à associer
+            attachment_ids: ids de pièces jointes Apollo (issus d'un cycle d'upload
+                hors périmètre de ce client — non fabriqués ici, cf. limite similaire
+                documentée sur Lightfield `send_email`)
+            enable_tracking: activer le suivi ouverture/clic
+            outreach_task_id: tâche Apollo à lier au brouillon
+
+        ⚠️ Aucun champ de boîte d'envoi (`email_account_id`/`from`) n'est documenté
+        sur CET endpoint — la boîte se décide à `send_email_now` (implicitement, ou
+        via la boîte par défaut du compte). Pas de verrou local équivalent à
+        `add_contacts_to_sequence` ici : rien à vérifier avant l'écriture du brouillon.
+
+        Returns:
+            Dict avec `emailer_message` (status `"drafted"`), `task` si lié
+        """
+        if not contact_id and not in_response_to_emailer_message_id:
+            raise ValueError(
+                "contact_id requis, sauf en réponse à un fil "
+                "(in_response_to_emailer_message_id)")
+        data: Dict[str, Any] = {}
+        if contact_id:
+            data["contact_id"] = contact_id
+        if subject:
+            data["subject"] = subject
+        if body_html:
+            data["body_html"] = body_html
+        if recipients:
+            data["recipients"] = recipients
+        if in_response_to_emailer_message_id:
+            data["in_response_to_emailer_message_id"] = in_response_to_emailer_message_id
+        if emailer_template_id:
+            data["emailer_template_id"] = emailer_template_id
+        if attachment_ids:
+            data["attachment_ids"] = attachment_ids
+        if enable_tracking is not None:
+            data["enable_tracking"] = enable_tracking
+        if outreach_task_id:
+            data["outreach_task_id"] = outreach_task_id
+        return self._request("POST", "emailer_messages", json=data)
+
+    def send_email_now(self, message_id: str, surface: str = None) -> Dict[str, Any]:
+        """
+        Send an existing draft NOW — le seul geste de ce client qui atteint une
+        personne réelle par email direct (hors séquence). Irréversible.
+
+        Args:
+            message_id: id rendu par create_email_draft
+            surface: attribution interne Apollo (optionnel, ex. "emails")
+
+        Returns:
+            Dict avec `emailer_message` (status mis à jour), `task` si lié
+        """
+        if not (message_id or "").strip():
+            raise ValueError("message_id requis")
+        data: Dict[str, Any] = {}
+        if surface:
+            data["surface"] = surface
+        return self._request("POST", f"emailer_messages/{message_id}/send_now", json=data)
+
+    def check_email_send_status(self, message_id: str) -> Dict[str, Any]:
+        """
+        Poll the send status of a message (0 crédit).
+
+        Args:
+            message_id: id du message (rendu par create_email_draft/send_email_now)
+
+        Returns:
+            Dict avec `status`, et selon l'état : `completed_at`, ou
+            `failure_reason`/`not_sent_reason`/`failed_at`, ou `retry_after_seconds`
+        """
+        if not (message_id or "").strip():
+            raise ValueError("message_id requis")
+        return self._request("POST", "emailer_messages/email_send_status", json={"id": message_id})
+
+    def search_emails(
+        self,
+        stats: List[str] = None,
+        reply_classes: List[str] = None,
+        sequence_ids: List[str] = None,
+        exclude_sequence_ids: List[str] = None,
+        keywords: str = None,
+        date_range_mode: str = None,
+        date_min: str = None,
+        date_max: str = None,
+        per_page: int = 25,
+        page: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Search sent/outreach emails (0 crédit). Plafond amont : 50 000 résultats
+        affichables (100/page × 500 pages).
+
+        Args:
+            stats: statuts (`delivered`, `scheduled`, `drafted`, `not_opened`,
+                `opened`, `clicked`, `unsubscribed`, `demoed`, `bounced`,
+                `spam_blocked`, `failed_other`)
+            reply_classes: sentiment de la réponse (`willing_to_meet`,
+                `follow_up_question`, `person_referral`, `out_of_office`,
+                `already_left_company_or_not_right_person`, `not_interested`,
+                `unsubscribe`, `none_of_the_above`)
+            sequence_ids / exclude_sequence_ids: inclure/exclure par séquence
+            keywords: recherche plein texte (`q_keywords`)
+            date_range_mode: `"due_at"` ou `"completed_at"`
+            date_min / date_max: bornes `YYYY-MM-DD`
+            per_page: ≤100. page: numéro de page
+
+        ⚠️ `page`/`per_page` sont doc-claimed, pas vérifiés : le compte de test
+        (Tulina, 2026-08-20) avait 0 email envoyé — la requête rend 200 dans les
+        deux cas, sans doublon d'un résultat NON VIDE pour confirmer qu'ils sont
+        honorés (vs. ignorés en silence, comme `organization_domain` l'a été
+        ailleurs dans ce fichier).
+
+        Returns:
+            Dict avec `emailer_messages`, `emailer_steps`
+        """
+        params: Dict[str, Any] = {"page": page, "per_page": per_page}
+        if stats:
+            params["emailer_message_stats[]"] = stats
+        if reply_classes:
+            params["emailer_message_reply_classes[]"] = reply_classes
+        if sequence_ids:
+            params["emailer_campaign_ids[]"] = sequence_ids
+        if exclude_sequence_ids:
+            params["not_emailer_campaign_ids[]"] = exclude_sequence_ids
+        if keywords:
+            params["q_keywords"] = keywords
+        if date_range_mode:
+            params["emailer_message_date_range_mode"] = date_range_mode
+        if date_min:
+            params["emailer_message_date_range[min]"] = date_min
+        if date_max:
+            params["emailer_message_date_range[max]"] = date_max
+        return self._request("GET", "emailer_messages/search", params=params)
+
+    def get_email_content(self, ids: List[str], body_format: str = "plain") -> Dict[str, Any]:
+        """
+        Fetch the body of up to 10 SENT emails (0 crédit).
+
+        Args:
+            ids: ids Apollo des emails envoyés — 10 max, le surplus est ignoré
+                EN SILENCE côté API (pas d'erreur)
+            body_format: `"plain"` (défaut) ou `"html"` — toute autre valeur
+                retombe silencieusement sur `"plain"` côté API
+
+        Returns:
+            Dict avec `emailer_messages` (dans l'ordre demandé ; ids sans match
+            omis en silence — seuls les emails effectivement ENVOYÉS sont rendus)
+        """
+        if not ids:
+            raise ValueError("ids requis (au moins un)")
+        data: Dict[str, Any] = {"ids": ids[:10]}
+        if body_format:
+            data["body_format"] = body_format
+        return self._request("POST", "emailer_messages/get_content", json=data)
+
+    def get_email_stats(self, message_id: str) -> Dict[str, Any]:
+        """
+        Open/click stats for one sent email (0 crédit).
+
+        ⚠️ Doc Apollo : nécessite une clé « Master » et n'est PAS disponible en
+        OAuth — à confirmer avec une clé réelle, pas vérifié depuis cet
+        environnement (403 sinon).
+
+        Args:
+            message_id: id du message — obtenu via search_emails
+
+        Returns:
+            Dict avec `emailer_message` (`num_opens`, `num_clicks`, ...), `activities`
+        """
+        if not (message_id or "").strip():
+            raise ValueError("message_id requis")
+        return self._request("GET", f"emailer_messages/{message_id}/activities")
+
+    # ------------------------------------------------------------------
+    # Conversations (appels/visios enregistrés — coût conditionnel : 1 crédit
+    # seulement si la conversation a des insights IA, 0 sinon — imprévisible
+    # avant l'appel, donc pas métré ici ; connecteur byo-only côté backend)
+    # ------------------------------------------------------------------
+
+    def search_conversations(
+        self,
+        conversation_type: str = None,
+        account_id: str = None,
+        contact_ids: List[str] = None,
+        tag_ids: List[str] = None,
+        tracker_ids: List[str] = None,
+        organization_ids: List[str] = None,
+        date_range: Dict[str, str] = None,
+        per_page: int = 25,
+        page: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Search recorded conversations (0 crédit — le coût est sur get_conversation).
+
+        Args:
+            conversation_type: `"video_conference"` ou `"phone_call"`
+            account_id: filtre par compte Apollo
+            contact_ids / organization_ids / tag_ids / tracker_ids: filtres
+            date_range: `{"start": ISO8601, "end": ISO8601}`
+            per_page: résultats par page. page: numéro de page
+
+        Returns:
+            Dict avec `conversations`, `pagination`
+        """
+        data: Dict[str, Any] = {"page": page, "num_fetch_result": per_page}
+        if conversation_type:
+            data["conversation_type"] = conversation_type
+        if account_id:
+            data["account_id"] = account_id
+        if contact_ids:
+            data["contact_ids"] = contact_ids
+        if tag_ids:
+            data["tag_ids"] = tag_ids
+        if tracker_ids:
+            data["tracker_ids"] = tracker_ids
+        if organization_ids:
+            data["organization_ids"] = organization_ids
+        if date_range:
+            data["date_range"] = date_range
+        return self._request("POST", "conversations/search", json=data)
+
+    def get_conversation(self, conversation_id: str) -> Dict[str, Any]:
+        """
+        Get one conversation — transcript, enregistrement, participants.
+
+        ⚠️ 1 crédit Apollo SI la conversation a des insights IA, 0 sinon —
+        imprévisible avant l'appel (pas un coût fixe qu'on peut prédire ni métrer
+        a priori).
+
+        Args:
+            conversation_id: id de conversation — accepte `id_shareid`
+
+        Returns:
+            Dict avec `transcript`, `participants`, `video_recording`/`audio_recording`,
+            `opportunities`
+        """
+        if not (conversation_id or "").strip():
+            raise ValueError("conversation_id requis")
+        return self._request("GET", f"conversations/{conversation_id}")
+
+    def export_conversations(self, start_time: str, end_time: str, email: str) -> Dict[str, Any]:
+        """
+        Kick off an async export of conversations over a time range.
+
+        N'attend PAS la fin de l'export — rend un `export_id` à repasser à
+        `get_conversations_export` pour poller (asynchrone côté Apollo ; ne pas
+        bloquer dessus côté appelant — un export peut prendre largement plus que
+        le timeout d'invocation d'un outil).
+
+        Args:
+            start_time / end_time: bornes ISO 8601 en GMT, `start_time` < `end_time`
+            email: adresse d'un membre de l'équipe à notifier quand l'export est prêt
+
+        Returns:
+            Dict avec `export_url`, `export_id`
+        """
+        if not (start_time or "").strip() or not (end_time or "").strip():
+            raise ValueError("start_time et end_time requis (ISO 8601)")
+        if not (email or "").strip():
+            raise ValueError("email requis (notification à un membre de l'équipe)")
+        data = {"start_time": start_time, "end_time": end_time, "email": email}
+        return self._request("POST", "conversations/export", json=data)
+
+    def get_conversations_export(self, export_id: str) -> Dict[str, Any]:
+        """
+        Poll an export started by export_conversations.
+
+        Args:
+            export_id: id rendu par export_conversations
+
+        Returns:
+            Dict avec `redirect_url` (URL signée de téléchargement) une fois prêt
+        """
+        if not (export_id or "").strip():
+            raise ValueError("export_id requis")
+        return self._request("GET", f"conversations/export/{export_id}")
