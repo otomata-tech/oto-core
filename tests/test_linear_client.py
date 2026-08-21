@@ -102,23 +102,26 @@ def test_list_issues_filter_built_from_given_ids(capture):
     assert body["variables"] == {"teamId": "t1", "stateId": "s1", "first": 50}
 
 
-def test_search_issues_without_team_id_has_no_filter_clause(capture):
-    """Regression: an earlier draft embedded a Python-style ternary directly
-    into the GraphQL query text (`filter: $teamId != null ? {...} : null`),
-    which is not valid GraphQL — the filter clause must be built in Python
-    and either included whole or omitted, never conditional inline."""
+def test_search_issues_uses_issues_query_not_deprecated_issue_search(capture):
+    """`issueSearch` exists in Linear's schema but is dead at call time
+    (live-confirmed 2026-08-21: `INPUT_ERROR "This endpoint deprecated."`
+    on every call). The real replacement is `issues(filter:
+    {searchableContent: {contains: ...}})`."""
     _client().search_issues("bug")
     body = capture["kwargs"]["json"]
-    assert "filter:" not in body["query"]
+    assert "issueSearch" not in body["query"]
+    assert "issues(filter:" in body["query"]
+    assert "searchableContent: { contains: $text }" in body["query"]
     assert "?" not in body["query"]
-    assert body["variables"] == {"query": "bug", "first": 50}
+    assert body["variables"] == {"text": "bug", "first": 50}
 
 
-def test_search_issues_with_team_id_includes_filter_clause(capture):
+def test_search_issues_with_team_id_includes_team_filter(capture):
     _client().search_issues("bug", team_id="t1")
     body = capture["kwargs"]["json"]
-    assert "filter: { team: { id: { eq: $teamId } } }" in body["query"]
-    assert body["variables"] == {"query": "bug", "teamId": "t1", "first": 50}
+    assert "searchableContent: { contains: $text }" in body["query"]
+    assert "team: { id: { eq: $teamId } }" in body["query"]
+    assert body["variables"] == {"text": "bug", "teamId": "t1", "first": 50}
 
 
 def test_create_issue_wraps_input(capture):
@@ -154,6 +157,20 @@ def test_create_webhook_wraps_input(capture):
         "url": "https://example.com/hook", "teamId": "t1",
         "resourceTypes": ["Issue", "Comment"], "enabled": True,
     }
+
+
+def test_delete_project(capture):
+    _client().delete_project("p1")
+    body = capture["kwargs"]["json"]
+    assert "projectDelete" in body["query"]
+    assert body["variables"] == {"id": "p1"}
+
+
+def test_delete_label(capture):
+    _client().delete_label("l1")
+    body = capture["kwargs"]["json"]
+    assert "issueLabelDelete" in body["query"]
+    assert body["variables"] == {"id": "l1"}
 
 
 def test_http_error_with_no_errors_body_is_typed(monkeypatch):

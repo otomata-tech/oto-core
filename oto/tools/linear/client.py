@@ -20,28 +20,55 @@ concrete differences worth calling out:
   instead of the generic `LinearGraphQLError`, mirroring `UnipileRateLimited`
   (oto/tools/unipile/client.py) — the caller should STOP, not retry blindly.
 
-⚠️ **No live key was available while building this client** — built from
-Linear's public developer docs (graphql reference + example queries/
-mutations) and general familiarity with Linear's GraphQL schema shape
-(Relay-style `nodes`/`pageInfo{hasNextPage,endCursor}` cursor pagination,
-`<Type>Filter` input objects). Default field selections below are
-conservative, doc-example-derived shapes, not introspection-verified.
-**Treat every method here as unverified until exercised against a real
-Linear API key** — see this repo's Fireflies client for what that pass
-tends to surface (doc-vs-reality mismatches in arg types, required-together
-params, renamed fields). In particular:
-- Whether `issue(id: ...)` accepts Linear's human-readable identifier
-  (`"ENG-123"`) as well as the UUID is asserted by long-standing community
-  usage, not confirmed in this session — verify before relying on it from a
-  caller that only has the human identifier.
-- `issueSearch` is the documented full-text search field; its argument shape
-  (query string vs a structured filter) should be confirmed against a real
-  response before exposing it beyond a keyword string.
+**Live-tested 2026-08-21** against a real workspace (`api.linear.app`, real
+key) — GraphQL introspection first (all 31 query/mutation field names + the
+9 mutation input-object shapes checked against the schema), then a full
+read + create/get/update/delete/archive lifecycle exercised on issues,
+comments, projects, labels, and webhooks, with every created object cleaned
+up (deleted, or archived for the one issue — archive is the reversible op
+by design). **6 real bugs found and fixed**, none of them catchable by
+introspection alone — Linear's schema and its live behavior disagree in
+several places:
+- `Project` has no `state` field to read (`Cannot query field "state" on
+  type "Project"` — the real field is `status`, an object with its own
+  `id`/`name`/`type`) — and `ProjectCreateInput`/`ProjectUpdateInput` have
+  no `state` input either, only `statusId` (an id into the workspace's
+  configured project statuses). `create_project`/`update_project` take
+  `status_id`, not a free-text state.
+- **A GraphQL operation must not declare a variable it never references.**
+  Every `list_*`/`search_issues` method here builds an optional filter from
+  several independent kwargs; declaring all of them in the query signature
+  unconditionally (an earlier draft did) fails with `GRAPHQL_VALIDATION_
+  FAILED: Variable "$x" is never used` the instant any ONE filter is
+  omitted — which, with 2+ independent filters, is nearly every call.
+  Variable declarations are now built in lockstep with the filter clause.
+- `Query.webhooks` has **no `filter` or `teamId` argument at all**
+  (`Unknown argument "filter" on field "Query.webhooks". Did you mean
+  "after"?`) — team-scoped webhooks only exist via the nested
+  `Team.webhooks` field, which `list_webhooks(team_id=...)` now uses
+  instead, faking the usual `{nodes, pageInfo}` shape (that nested field
+  has no pagination args of its own).
+- `issueSearch` **exists in the schema** (passes introspection) but is DEAD
+  at call time — `INPUT_ERROR: "This endpoint deprecated."` on every call,
+  any arguments. `search_issues` now uses the live replacement,
+  `issues(filter: { searchableContent: { contains: ... } })`
+  (`ContentComparator`, confirmed via introspection).
+- `Project.accessibleTeams` (used to scope `list_projects` by team) is a
+  `TeamCollectionFilter`, not a plain `TeamFilter` — it needs the `some:`
+  wrapper (`accessibleTeams: { some: { id: { eq: ... } } }`); the bare
+  `{ id: { eq: ... } }` form is syntactically valid (the collection filter
+  type has its own top-level `id` field too) but semantically unclear.
+  Confirmed correct with a real project: found via `some:`, both filtered
+  and unfiltered.
+- `get_issue("OPE-9")` (Linear's human-readable identifier) works exactly
+  like `get_issue("<uuid>")` — same field, both forms resolve.
+
+Everything above reflects the CURRENT client, post-fix — no residual
+workarounds needed by a caller.
 
 **Webhooks are a real GraphQL surface here** (`webhookCreate`/`webhookUpdate`
-/`webhookDelete`/`webhooks`), unlike Fireflies where webhook management is
-dashboard-only — so this client, unlike Fireflies', DOES expose webhook
-management methods.
+/`webhookDelete`/`webhooks`/`Team.webhooks`), unlike Fireflies where webhook
+management is dashboard-only.
 """
 from __future__ import annotations
 
@@ -181,9 +208,9 @@ class LinearClient:
     """
 
     def get_issue(self, issue_id: str, *, fields: Optional[str] = None) -> Any:
-        """`issue(id: ...)` — one issue. `id` is documented to accept the
-        UUID; whether Linear's human-readable identifier (`"ENG-123"`) also
-        resolves here is unverified (see module docstring)."""
+        """`issue(id: ...)` — one issue. `id` accepts either the UUID or
+        Linear's human-readable identifier (`"ENG-123"`), live-confirmed
+        2026-08-21 (`get_issue("OPE-9")` resolved identically to the UUID)."""
         query = f"""
             query Issue($id: String!) {{
               issue(id: $id) {{ {fields or self._ISSUE_FIELDS} }}
@@ -200,50 +227,68 @@ class LinearClient:
                      fields: Optional[str] = None) -> Any:
         """`issues(filter:, first:, after:)` — list/filter issues. Returns
         the raw `{nodes, pageInfo{hasNextPage,endCursor}}` shape; pass the
-        previous call's `endCursor` as `after` to page further."""
+        previous call's `endCursor` as `after` to page further.
+
+        ⚠️ Live-confirmed 2026-08-21: a GraphQL operation must not DECLARE a
+        variable it never references in the selection — declaring all 5
+        filter variables unconditionally (as an earlier draft did) fails
+        with `GRAPHQL_VALIDATION_FAILED: Variable "$x" is never used` the
+        moment any ONE filter is omitted. Variable declarations are built
+        alongside the filter clause below, in lockstep."""
+        filters = [("teamId", "ID", "team", team_id),
+                   ("projectId", "ID", "project", project_id),
+                   ("cycleId", "ID", "cycle", cycle_id),
+                   ("assigneeId", "ID", "assignee", assignee_id),
+                   ("stateId", "ID", "state", state_id)]
+        var_decls = ["$first: Int", "$after: String"]
         filter_parts = []
-        if team_id: filter_parts.append('team: { id: { eq: $teamId } }')
-        if project_id: filter_parts.append('project: { id: { eq: $projectId } }')
-        if cycle_id: filter_parts.append('cycle: { id: { eq: $cycleId } }')
-        if assignee_id: filter_parts.append('assignee: { id: { eq: $assigneeId } }')
-        if state_id: filter_parts.append('state: { id: { eq: $stateId } }')
+        variables: Dict[str, Any] = {"first": first, "after": after}
+        for var_name, gql_type, filter_key, value in filters:
+            if value is None:
+                continue
+            var_decls.append(f"${var_name}: {gql_type}")
+            filter_parts.append(f"{filter_key}: {{ id: {{ eq: ${var_name} }} }}")
+            variables[var_name] = value
         filter_clause = f"filter: {{ {', '.join(filter_parts)} }}" if filter_parts else ""
         query = f"""
-            query Issues($teamId: ID, $projectId: ID, $cycleId: ID,
-                          $assigneeId: ID, $stateId: ID,
-                          $first: Int, $after: String) {{
+            query Issues({', '.join(var_decls)}) {{
               issues({filter_clause} first: $first, after: $after) {{
                 nodes {{ {fields or self._ISSUE_FIELDS} }}
                 pageInfo {{ hasNextPage endCursor }}
               }}
             }}
         """
-        return self._execute(query, {
-            "teamId": team_id, "projectId": project_id, "cycleId": cycle_id,
-            "assigneeId": assignee_id, "stateId": state_id,
-            "first": first, "after": after,
-        })["issues"]
+        return self._execute(query, variables)["issues"]
 
     def search_issues(self, query_text: str, *, team_id: Optional[str] = None,
                        first: int = 50, after: Optional[str] = None,
                        fields: Optional[str] = None) -> Any:
-        """`issueSearch(query:, filter:, first:, after:)` — full-text search
-        across title + description. Argument shape unverified live (see
-        module docstring) — built from the documented example."""
-        filter_clause = 'filter: { team: { id: { eq: $teamId } } },' if team_id else ""
+        """Full-text search across title + description, via
+        `issues(filter: { searchableContent: { contains: ... } })`.
+
+        ⚠️ Live-confirmed 2026-08-21: the documented `issueSearch` query
+        still EXISTS in the schema (passes introspection) but is dead at
+        call time — `INPUT_ERROR: "This endpoint deprecated."` on every
+        call, regardless of arguments. `IssueFilter.searchableContent`
+        (a `ContentComparator` — `contains`/`notContains`, confirmed via
+        introspection) on the plain `issues` query is the real, live
+        replacement; this method uses it instead."""
+        var_decls = ["$text: String!", "$first: Int", "$after: String"]
+        filter_parts = ["searchableContent: { contains: $text }"]
+        variables: Dict[str, Any] = {"text": query_text, "first": first, "after": after}
+        if team_id is not None:
+            var_decls.append("$teamId: ID")
+            filter_parts.append("team: { id: { eq: $teamId } }")
+            variables["teamId"] = team_id
         query = f"""
-            query IssueSearch($query: String!, $teamId: ID,
-                               $first: Int, $after: String) {{
-              issueSearch(query: $query, {filter_clause}
-                          first: $first, after: $after) {{
+            query IssueSearch({', '.join(var_decls)}) {{
+              issues(filter: {{ {', '.join(filter_parts)} }}, first: $first, after: $after) {{
                 nodes {{ {fields or self._ISSUE_FIELDS} }}
                 pageInfo {{ hasNextPage endCursor }}
               }}
             }}
         """
-        return self._execute(query, {
-            "query": query_text, "teamId": team_id, "first": first, "after": after,
-        })["issueSearch"]
+        return self._execute(query, variables)["issues"]
 
     def create_issue(self, title: str, team_id: str, *,
                       description: Optional[str] = None,
@@ -409,7 +454,7 @@ class LinearClient:
         id
         name
         description
-        state
+        status { id name type }
         url
         targetDate
         createdAt
@@ -430,28 +475,44 @@ class LinearClient:
     def list_projects(self, *, team_id: Optional[str] = None,
                        first: int = 50, after: Optional[str] = None,
                        fields: Optional[str] = None) -> Any:
-        """`projects(filter:)` — optionally scoped to one team."""
-        filter_clause = 'filter: { accessibleTeams: { id: { eq: $teamId } } }' if team_id else ""
+        """`projects(filter:)` — optionally scoped to one team via
+        `accessibleTeams.some.id`. `accessibleTeams` is a
+        `TeamCollectionFilter`, which — unlike the plain `TeamFilter` used
+        by `team:` filters elsewhere in this file — wraps a per-item filter
+        under `some:`/`every:`. Live-confirmed 2026-08-21 against a real
+        project: `some:` correctly finds a project scoped to the given team
+        (both with and without the filter). The collection filter's own
+        bare top-level `id` field was not tested — this method doesn't use it."""
+        var_decls = ["$first: Int", "$after: String"]
+        filter_clause = ""
+        variables: Dict[str, Any] = {"first": first, "after": after}
+        if team_id is not None:
+            var_decls.append("$teamId: ID")
+            filter_clause = "filter: { accessibleTeams: { some: { id: { eq: $teamId } } } }"
+            variables["teamId"] = team_id
         query = f"""
-            query Projects($teamId: ID, $first: Int, $after: String) {{
+            query Projects({', '.join(var_decls)}) {{
               projects({filter_clause} first: $first, after: $after) {{
                 nodes {{ {fields or self._PROJECT_FIELDS} }}
                 pageInfo {{ hasNextPage endCursor }}
               }}
             }}
         """
-        return self._execute(query, {
-            "teamId": team_id, "first": first, "after": after,
-        })["projects"]
+        return self._execute(query, variables)["projects"]
 
     def create_project(self, name: str, team_ids: List[str], *,
                         description: Optional[str] = None,
-                        state: Optional[str] = None,
+                        status_id: Optional[str] = None,
                         lead_id: Optional[str] = None,
                         target_date: Optional[str] = None,
                         fields: Optional[str] = None) -> Any:
         """`projectCreate(input:)`. `team_ids` is required — a project
-        belongs to at least one team."""
+        belongs to at least one team. `status_id` (NOT a free-text state —
+        live-confirmed 2026-08-21 via introspection: `ProjectCreateInput`
+        has no `state` field at all, only `statusId`, an id into the
+        workspace's configured `ProjectStatus` list) references one of the
+        team's/workspace's project statuses — resolve one by reading an
+        existing project's `status.id` via `get_project`/`list_projects`."""
         query = f"""
             mutation ProjectCreate($input: ProjectCreateInput!) {{
               projectCreate(input: $input) {{
@@ -462,18 +523,19 @@ class LinearClient:
         """
         input_ = _clean({
             "name": name, "teamIds": team_ids, "description": description,
-            "state": state, "leadId": lead_id, "targetDate": target_date,
+            "statusId": status_id, "leadId": lead_id, "targetDate": target_date,
         })
         return self._execute(query, {"input": input_})["projectCreate"]
 
     def update_project(self, project_id: str, *,
                         name: Optional[str] = None,
                         description: Optional[str] = None,
-                        state: Optional[str] = None,
+                        status_id: Optional[str] = None,
                         lead_id: Optional[str] = None,
                         target_date: Optional[str] = None,
                         fields: Optional[str] = None) -> Any:
-        """`projectUpdate(id:, input:)`."""
+        """`projectUpdate(id:, input:)`. `status_id`, not a free-text state
+        — see `create_project`'s docstring."""
         query = f"""
             mutation ProjectUpdate($id: String!, $input: ProjectUpdateInput!) {{
               projectUpdate(id: $id, input: $input) {{
@@ -483,10 +545,19 @@ class LinearClient:
             }}
         """
         input_ = _clean({
-            "name": name, "description": description, "state": state,
+            "name": name, "description": description, "statusId": status_id,
             "leadId": lead_id, "targetDate": target_date,
         })
         return self._execute(query, {"id": project_id, "input": input_})["projectUpdate"]
+
+    def delete_project(self, project_id: str) -> Any:
+        """`projectDelete(id:)`."""
+        query = """
+            mutation ProjectDelete($id: String!) {
+              projectDelete(id: $id) { success }
+            }
+        """
+        return self._execute(query, {"id": project_id})["projectDelete"]
 
     # ================================================================
     # Teams & workflow states
@@ -554,18 +625,22 @@ class LinearClient:
                      first: int = 50, after: Optional[str] = None,
                      fields: Optional[str] = None) -> Any:
         """`cycles(filter:)` — optionally scoped to one team."""
-        filter_clause = 'filter: { team: { id: { eq: $teamId } } }' if team_id else ""
+        var_decls = ["$first: Int", "$after: String"]
+        filter_clause = ""
+        variables: Dict[str, Any] = {"first": first, "after": after}
+        if team_id is not None:
+            var_decls.append("$teamId: ID")
+            filter_clause = "filter: { team: { id: { eq: $teamId } } }"
+            variables["teamId"] = team_id
         query = f"""
-            query Cycles($teamId: ID, $first: Int, $after: String) {{
+            query Cycles({', '.join(var_decls)}) {{
               cycles({filter_clause} first: $first, after: $after) {{
                 nodes {{ {fields or self._CYCLE_FIELDS} }}
                 pageInfo {{ hasNextPage endCursor }}
               }}
             }}
         """
-        return self._execute(query, {
-            "teamId": team_id, "first": first, "after": after,
-        })["cycles"]
+        return self._execute(query, variables)["cycles"]
 
     # ================================================================
     # Labels
@@ -587,18 +662,22 @@ class LinearClient:
                      fields: Optional[str] = None) -> Any:
         """`issueLabels(filter:)` — optionally scoped to one team (workspace
         labels have no `team`)."""
-        filter_clause = 'filter: { team: { id: { eq: $teamId } } }' if team_id else ""
+        var_decls = ["$first: Int", "$after: String"]
+        filter_clause = ""
+        variables: Dict[str, Any] = {"first": first, "after": after}
+        if team_id is not None:
+            var_decls.append("$teamId: ID")
+            filter_clause = "filter: { team: { id: { eq: $teamId } } }"
+            variables["teamId"] = team_id
         query = f"""
-            query IssueLabels($teamId: ID, $first: Int, $after: String) {{
+            query IssueLabels({', '.join(var_decls)}) {{
               issueLabels({filter_clause} first: $first, after: $after) {{
                 nodes {{ {fields or self._LABEL_FIELDS} }}
                 pageInfo {{ hasNextPage endCursor }}
               }}
             }}
         """
-        return self._execute(query, {
-            "teamId": team_id, "first": first, "after": after,
-        })["issueLabels"]
+        return self._execute(query, variables)["issueLabels"]
 
     def create_label(self, name: str, *, team_id: Optional[str] = None,
                       color: Optional[str] = None,
@@ -620,6 +699,15 @@ class LinearClient:
             "name": name, "teamId": team_id, "color": color, "description": description,
         })
         return self._execute(query, {"input": input_})["issueLabelCreate"]
+
+    def delete_label(self, label_id: str) -> Any:
+        """`issueLabelDelete(id:)`."""
+        query = """
+            mutation IssueLabelDelete($id: String!) {
+              issueLabelDelete(id: $id) { success }
+            }
+        """
+        return self._execute(query, {"id": label_id})["issueLabelDelete"]
 
     # ================================================================
     # Users
@@ -665,19 +753,34 @@ class LinearClient:
     def list_webhooks(self, *, team_id: Optional[str] = None,
                        first: int = 50, after: Optional[str] = None,
                        fields: Optional[str] = None) -> Any:
-        """`webhooks(filter:)` — optionally scoped to one team."""
-        filter_clause = 'filter: { team: { id: { eq: $teamId } } }' if team_id else ""
+        """`webhooks(first:, after:)` (workspace-wide) or, when `team_id`
+        is given, `team(id:){webhooks{...}}` (team-scoped).
+
+        ⚠️ Live-confirmed 2026-08-21: `Query.webhooks` has NO `filter` (nor
+        a `teamId`) argument at all — `GRAPHQL_VALIDATION_FAILED: Unknown
+        argument "filter" on field "Query.webhooks"` on the first attempt.
+        Team-scoping only exists via the nested `Team.webhooks` field,
+        which has no pagination args of its own (no `pageInfo` either) —
+        this method fakes the same `{nodes, pageInfo}` shape as every other
+        list method here so callers don't need a special case, but a large
+        team's webhook list is NOT actually paginated by Linear in this path."""
+        if team_id is not None:
+            query = """
+                query TeamWebhooks($teamId: String!) {
+                  team(id: $teamId) { webhooks { nodes { %s } } }
+                }
+            """ % (fields or self._WEBHOOK_FIELDS)
+            nodes = self._execute(query, {"teamId": team_id})["team"]["webhooks"]["nodes"]
+            return {"nodes": nodes, "pageInfo": {"hasNextPage": False, "endCursor": None}}
         query = f"""
-            query Webhooks($teamId: ID, $first: Int, $after: String) {{
-              webhooks({filter_clause} first: $first, after: $after) {{
+            query Webhooks($first: Int, $after: String) {{
+              webhooks(first: $first, after: $after) {{
                 nodes {{ {fields or self._WEBHOOK_FIELDS} }}
                 pageInfo {{ hasNextPage endCursor }}
               }}
             }}
         """
-        return self._execute(query, {
-            "teamId": team_id, "first": first, "after": after,
-        })["webhooks"]
+        return self._execute(query, {"first": first, "after": after})["webhooks"]
 
     def create_webhook(self, url: str, *, team_id: Optional[str] = None,
                         resource_types: Optional[List[str]] = None,
