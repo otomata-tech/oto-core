@@ -1,14 +1,43 @@
 """Forager.ai API Client — https://docs.forager.ai (job posts, org/people enrichment)
 
+**Live-tested 2026-08-21** against a real Trial-tier key (50.00 credits,
+36.00 spent across one call per method — see below for confirmed costs and
+behavior). Everything else in this docstring was spec-only until then.
+
 Paid, per-lookup API — most calls here bill credits against the account's
-subscription. `GET /api/users/current/` and the two `balance_change_logs`
-endpoints are metadata reads and do not.
+subscription; confirmed free: `get_current_user`, `list_balance_change_logs`,
+`get_balance_change_totals`, every `autocomplete_*`, both `*_totals` search
+methods, and — **only when they return no result** — the contact-lookup
+methods (`lookup_person_work_emails`/`personal_emails`/`phone_numbers`
+return `[]` and are NOT billed on a miss; billed only on an actual hit,
+confirmed live: `phone_numbers` billed 15.00 on a hit, `work_emails`/
+`personal_emails` billed nothing on `[]`).
+
+⚠️ **Two different "no match" behaviors, confirmed live — do not conflate
+them.** `lookup_person_work_emails`/`personal_emails`/`phone_numbers`
+degrade to an empty list `[]` on no match (see above). But
+`lookup_person_by_email`/`lookup_person_by_phone_number` (the REVERSE
+lookups) raise `UpstreamHTTPError(404)` instead — confirmed live
+(`{'detail': 'No person matches the given email.'}`), no charge either way.
+A caller checking "did this find anything" needs a different check per
+method family: falsy return vs. caught exception.
+
+⚠️ **`search_job_posts_totals`'s count does not necessarily match
+`search_job_posts`'s `total_search_results` for the identical filter** —
+confirmed live on one real query (500 vs. 949). Not investigated further
+(could be a Forager-side inconsistency, not something this client can fix);
+treat `_totals` as the number to trust for volume, not a cross-check.
 
 **IDs, not free text.** Filters like `locations`, `industries`,
 `industries_exclude`, `keywords`/`organization_keywords`, `web_technologies`/
 `organization_web_technologies` and `person_skills` all take **integer IDs**
 resolved via the `autocomplete_*` methods below — passing a raw string
-(e.g. `locations=["Paris"]`) will not match anything.
+(e.g. `locations=["Paris"]`) will not match anything. ⚠️ **Confirmed live:
+`autocomplete_*` returns `results[].id` as a STRING** (e.g. `"9839"`), even
+though every filter field expecting it is typed `[integer]` — cast to `int`
+before passing into a search filter. Not confirmed whether the search
+endpoints tolerate the string form directly (not worth spending more trial
+credits to check); casting defensively is free and safe either way.
 
 **No API-key management here, deliberately.** The spec exposes
 `GET/POST /api/api_keys/` and `GET/DELETE /api/api_keys/{prefix}/`, but this
@@ -217,9 +246,13 @@ class ForagerClient:
         return self._request("POST", self._account_path("/datastorage/person_detail_lookup/"), json=body)
 
     def lookup_person_by_email(self, email: str) -> Dict[str, Any]:
+        """Raises `UpstreamHTTPError(404)` on no match (confirmed live) —
+        unlike the contact-lookup methods above, which return `[]`."""
         return self._request("POST", self._account_path("/datastorage/person_detail_reverse_lookup/by_email/"), json={"email": email})
 
     def lookup_person_by_phone_number(self, phone_number: str) -> Dict[str, Any]:
+        """Raises `UpstreamHTTPError(404)` on no match (confirmed live) —
+        unlike the contact-lookup methods above, which return `[]`."""
         return self._request(
             "POST", self._account_path("/datastorage/person_detail_reverse_lookup/by_phone_number/"),
             json={"phone_number": phone_number},
@@ -271,7 +304,9 @@ class ForagerClient:
 
     # ------------------------------------------------------------------
     # Autocomplete — resolves free text to the integer IDs the search/filter
-    # fields above require. `q` required, `page` optional. Free.
+    # fields above require. `q` required, `page` optional. Free (confirmed
+    # live). ⚠️ `results[].id` comes back as a STRING (e.g. "9839") —
+    # confirmed live — cast to `int` before using it in a search filter.
 
     def _autocomplete(self, kind: str, q: str, *, page: int = None) -> Dict[str, Any]:
         params = {"q": q}
