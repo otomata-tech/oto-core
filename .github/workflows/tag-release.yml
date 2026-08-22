@@ -1,0 +1,56 @@
+name: Tag release (poser un tag de version)
+
+# POURQUOI CE WORKFLOW (même motif que release.yml d'oto-backend).
+# oto-core est pinné par tag git dans oto-backend : chaque release = un commit de
+# bump `version` + un tag `vX.Y.Z`. Or une session Claude Code cloud/web peut
+# pousser sur main mais PAS pousser un tag (403 côté plateforme). Sans ce
+# workflow, la moitié de la release resterait impossible depuis le web.
+#
+# Le tag est posé sur le HEAD de main par le workflow lui-même (GITHUB_TOKEN,
+# contents: write). Vérification incluse : le `version` du pyproject doit être
+# ÉGAL au tag demandé — c'est le gotcha documenté dans CLAUDE.md (un tag posé
+# sans bump fait mentir `pip show oto-core`, vécu le 2026-06-22).
+#
+# NB : un tag créé avec le GITHUB_TOKEN ne déclenche aucun autre workflow
+# (garde anti-récursion GitHub). Ici c'est sans effet : rien ne s'abonne aux
+# tags dans ce repo.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Tag à poser sur le HEAD de main (ex: v1.90.0). Doit égaler le version du pyproject."
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: main
+      - name: Vérifier format + concordance pyproject
+        env:
+          DEMANDEE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          case "$DEMANDEE" in
+            v[0-9]*.[0-9]*.[0-9]*) : ;;
+            *) echo "::error::version invalide '$DEMANDEE' (attendu vX.Y.Z)"; exit 1 ;;
+          esac
+          PYVER=$(sed -n 's/^version = "\(.*\)"/\1/p' pyproject.toml)
+          if [ "v$PYVER" != "$DEMANDEE" ]; then
+            echo "::error::pyproject version=$PYVER ≠ tag demandé $DEMANDEE — bumper d'abord (CLAUDE.md : jamais de tag sans bump)"
+            exit 1
+          fi
+      - name: Poser le tag
+        env:
+          DEMANDEE: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$DEMANDEE"
+          git push origin "refs/tags/$DEMANDEE"
