@@ -945,3 +945,242 @@ class ApolloClient:
         if not (export_id or "").strip():
             raise ValueError("export_id requis")
         return self._request("GET", f"conversations/export/{export_id}")
+
+    # ------------------------------------------------------------------
+    # Contacts — les personnes DANS l'espace de travail du propriétaire de la
+    # clé, PAS la base partagée Apollo. C'est une frontière de données, pas de
+    # verbe : `people/*` interroge les ~275M profils que tout le monde voit,
+    # `contacts/*` ne voit que ce que CETTE équipe a enregistré.
+    #
+    # Les trois endpoints coûtent **0 crédit** (doc Apollo, vérifiée le
+    # 2026-08-22) — c'est la raison d'être de `get_contact` : relire un contact
+    # qu'on possède déjà ne doit pas repayer le crédit de `match_person`.
+    #
+    # ⚠️ Les trois demandent une clé **Master** (ou le scope nommé :
+    # `api/v1/typed_custom_fields/index`, `api/v1/contacts/show`,
+    # `api/v1/contacts/update`) et rendent 403 sinon. Non rejoué en vrai (pas de clé Apollo dans cet
+    # environnement) — même réserve que les séquences ci-dessus.
+    # ------------------------------------------------------------------
+
+    def list_typed_custom_fields(self) -> Dict[str, Any]:
+        """
+        List the custom field definitions of this Apollo team (0 crédit).
+
+        C'est l'endpoint qui donne les **ids** que `update_contact` exige :
+        `typed_custom_fields` est keyé par ID, pas par nom. Sans ce catalogue on
+        ne peut pas écrire un champ personnalisé, seulement le deviner.
+
+        ⚠️ **Apollo marque cet endpoint déprécié au profit de `GET /fields`
+        (source=custom) — on reste ICI sciemment, et ce choix ne doit pas être
+        « modernisé » sans vérifier ce point** : les deux catalogues ne rendent
+        pas la même forme d'id. `typed_custom_fields` rend l'ObjectId NU
+        (`"60c39ed82bd02f01154c470a"`), qui est exactement la clé attendue par
+        `PATCH /contacts/{id}` ; `/fields` rend un id PRÉFIXÉ de sa modalité
+        (`"account.694095a80f1b6000110fc556"`, `"contact.id"`), qu'aucune doc
+        n'autorise à découper. Prendre le catalogue « moderne » ferait donc
+        écrire des clés qu'Apollo ignore en silence, en rendant 200.
+        (Doc Apollo vérifiée le 2026-08-22 ; non rejoué en vrai, pas de clé ici.)
+
+        Returns:
+            Dict avec `typed_custom_fields` : chaque entrée porte `id`
+            (ObjectId nu), `name`, `modality` (contact/account/opportunity),
+            `type` (text, number, date, datetime, boolean, picklist,
+            multi_select, url, email, phone, currency) et, pour une picklist,
+            `picklist_values` — dont il faut envoyer l'`id`, pas le `name`.
+        """
+        return self._request("GET", "typed_custom_fields")
+
+    # Champs de tri documentés. Un nom hors liste est REFUSÉ plutôt qu'envoyé :
+    # Apollo ignore un tri qu'il ne connaît pas et rend son ordre par défaut, que
+    # l'appelant lira comme « voilà les plus récemment modifiés ».
+    CONTACT_SORT_FIELDS = (
+        "contact_last_activity_date", "contact_email_last_opened_at",
+        "contact_email_last_clicked_at", "contact_created_at",
+        "contact_updated_at",
+    )
+
+    # Types acceptés à la création d'un champ personnalisé. ⚠️ `string` est BORNÉ
+    # (`text_field_max_length`, 120 par défaut côté Apollo) : un texte plus long y
+    # est tronqué. Pour une phrase d'accroche ou un corps d'email, c'est `textarea`.
+    CUSTOM_FIELD_TYPES = (
+        "string", "textarea", "number", "date", "datetime", "boolean",
+    )
+    CUSTOM_FIELD_MODALITIES = ("contact", "account", "opportunity")
+
+    def create_custom_field(
+        self,
+        label: str,
+        modality: str = "contact",
+        field_type: str = "string",
+        max_length: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """
+        Declare a new custom field on this Apollo team (0 crédit).
+
+        Geste de MISE EN PLACE, joué une fois par champ : c'est l'équivalent API
+        de Settings → Custom Fields, pour qui n'a pas accès à l'interface du
+        compte Apollo.
+
+        ⚠️ **Apollo ne déduplique pas sur le libellé.** Rejouer cet appel crée un
+        SECOND champ portant le même nom, et rien ne le signale. Les deux
+        apparaissent au catalogue, la variable d'une séquence en désigne UN, et
+        les écritures qui visent l'autre n'apparaissent nulle part. Lire
+        `list_typed_custom_fields()` avant de créer.
+
+        Args:
+            label: nom du champ tel qu'il s'affichera
+            modality: `contact` | `account` | `opportunity`
+            field_type: cf. CUSTOM_FIELD_TYPES — `textarea` pour un texte long,
+                `string` étant borné et tronquant en silence
+            max_length: longueur max (texte seulement)
+
+        Returns:
+            Dict avec `typed_custom_fields` : le champ créé, dont l'`id` — NU,
+            directement utilisable en clé de `typed_custom_fields`.
+        """
+        if not (label or "").strip():
+            raise ValueError("label requis (le nom du champ)")
+        if modality not in self.CUSTOM_FIELD_MODALITIES:
+            raise ValueError(
+                f"modality invalide : {modality!r} — attendu parmi "
+                f"{list(self.CUSTOM_FIELD_MODALITIES)}")
+        if field_type not in self.CUSTOM_FIELD_TYPES:
+            raise ValueError(
+                f"field_type invalide : {field_type!r} — attendu parmi "
+                f"{list(self.CUSTOM_FIELD_TYPES)}")
+        if max_length is not None and field_type not in ("string", "textarea"):
+            raise ValueError(
+                f"max_length n'a de sens que sur un champ texte, pas sur "
+                f"{field_type!r}")
+        data: Dict[str, Any] = {
+            "label": label, "modality": modality, "type": field_type}
+        if max_length is not None:
+            data["meta"] = {"max_length": max_length}
+        return self._request("POST", "fields", json=data)
+
+    def search_contacts(
+        self,
+        q_keywords: Optional[str] = None,
+        contact_stage_ids: Optional[List[str]] = None,
+        contact_label_ids: Optional[List[str]] = None,
+        sort_by_field: Optional[str] = None,
+        sort_ascending: Optional[bool] = None,
+        per_page: int = 25,
+        page: int = 1,
+    ) -> Dict[str, Any]:
+        """
+        Search the contacts SAVED BY THIS TEAM (0 crédit).
+
+        ⚠️ Ne cherche PAS dans la base Apollo partagée — c'est
+        `search_people`. Ici on ne voit que ce que l'équipe a enregistré ; en
+        retour, c'est le seul endroit qui rende un `id` utilisable comme
+        `contact_id` (et comme `contact_ids` d'un enrôlement en séquence).
+
+        Args:
+            q_keywords: recherche libre sur nom, intitulé, employeur, email
+            contact_stage_ids: ids de stages à inclure
+            contact_label_ids: ids de listes/labels à inclure
+            sort_by_field: parmi CONTACT_SORT_FIELDS
+            sort_ascending: ordre croissant — exige `sort_by_field`
+            per_page: résultats par page (Apollo plafonne à 100)
+            page: numéro de page (Apollo plafonne l'affichage à 500 pages,
+                soit 50 000 enregistrements : au-delà il faut filtrer)
+
+        Returns:
+            Dict avec `contacts`, `breadcrumbs`, `pagination`
+            (`page`, `per_page`, `total_entries`, `total_pages`) et
+            `partial_results_only`
+        """
+        if sort_by_field is not None and sort_by_field not in self.CONTACT_SORT_FIELDS:
+            raise ValueError(
+                f"sort_by_field invalide : {sort_by_field!r} — attendu parmi "
+                f"{list(self.CONTACT_SORT_FIELDS)}")
+        if sort_ascending is not None and not sort_by_field:
+            raise ValueError(
+                "sort_ascending n'a de sens qu'avec sort_by_field — sans lui "
+                "Apollo applique son ordre par défaut et l'ordre demandé est perdu")
+        data: Dict[str, Any] = {"per_page": per_page, "page": page}
+        if q_keywords:
+            data["q_keywords"] = q_keywords
+        if contact_stage_ids:
+            data["contact_stage_ids"] = contact_stage_ids
+        if contact_label_ids:
+            data["contact_label_ids"] = contact_label_ids
+        if sort_by_field:
+            data["sort_by_field"] = sort_by_field
+        if sort_ascending is not None:
+            data["sort_ascending"] = sort_ascending
+        return self._request("POST", "contacts/search", json=data)
+
+    def get_contact(self, contact_id: str) -> Dict[str, Any]:
+        """
+        Read one contact of this workspace by its Apollo id (0 crédit).
+
+        ⚠️ **Ne coûte rien, contrairement à `match_person`** : relire quelqu'un
+        qu'on possède déjà n'est pas un enrichissement. Passer par `people/match`
+        pour ça brûle un crédit et rend la fiche de la base PARTAGÉE, pas les
+        valeurs que l'équipe a écrites (stage, propriétaire, champs perso).
+
+        Args:
+            contact_id: id Apollo du contact
+
+        Returns:
+            Dict avec `contact` (dont `typed_custom_fields`, `label_ids`,
+            `contact_stage_id`, `owner_id`, `phone_numbers`) et `labels`.
+
+        Raises:
+            ApolloError: 422 si le contact n'existe pas, a été supprimé, ou
+                n'appartient pas à l'équipe de cette clé.
+        """
+        if not (contact_id or "").strip():
+            raise ValueError("contact_id requis")
+        return self._request("GET", f"contacts/{contact_id}")
+
+    # Champs documentés en écriture sur `PATCH /contacts/{id}`. Figés ici plutôt
+    # qu'ouverts au **kwargs libre : un nom de champ inventé part dans le corps,
+    # Apollo l'ignore en silence et rend 200 — l'appelant croit avoir écrit.
+    UPDATABLE_CONTACT_FIELDS = (
+        "first_name", "last_name", "organization_name", "title", "account_id",
+        "email", "website_url", "label_names", "contact_stage_id",
+        "present_raw_address", "direct_phone", "corporate_phone", "mobile_phone",
+        "home_phone", "other_phone", "typed_custom_fields",
+    )
+
+    def update_contact(self, contact_id: str, **fields: Any) -> Dict[str, Any]:
+        """
+        Update one contact of this workspace (0 crédit). PATCH : les champs
+        non transmis sont laissés INTACTS.
+
+        ⚠️ `label_names` fait exception à ce « intact » — Apollo REMPLACE
+        l'appartenance aux listes par ce qu'on envoie. Envoyer une seule liste
+        retire le contact de toutes les autres.
+
+        ⚠️ `typed_custom_fields` est keyé par **id** de champ personnalisé, pas
+        par nom : `{"60c39ed82bd02f01154c470a": "2026-08-07"}`. Pour une picklist, la valeur
+        est l'`id` de l'option (`picklist_values[].id`), pas son libellé. Les ids se lisent
+        avec `list_typed_custom_fields()`.
+
+        Args:
+            contact_id: id Apollo du contact à modifier
+            **fields: parmi UPDATABLE_CONTACT_FIELDS. Un nom hors liste lève
+                ValueError plutôt que de partir se faire ignorer par Apollo.
+
+        Returns:
+            Dict avec le `contact` à jour
+        """
+        if not (contact_id or "").strip():
+            raise ValueError("contact_id requis")
+        unknown = sorted(set(fields) - set(self.UPDATABLE_CONTACT_FIELDS))
+        if unknown:
+            raise ValueError(
+                f"champs non modifiables sur un contact Apollo : {unknown} — "
+                f"attendu parmi {list(self.UPDATABLE_CONTACT_FIELDS)}")
+        data = {k: v for k, v in fields.items() if v is not None}
+        if not data:
+            raise ValueError("aucun champ à modifier")
+        tcf = data.get("typed_custom_fields")
+        if tcf is not None and not isinstance(tcf, dict):
+            raise ValueError(
+                "typed_custom_fields doit être un objet {id_du_champ: valeur} — "
+                "keyé par l'id rendu par list_typed_custom_fields(), pas par le nom")
+        return self._request("PATCH", f"contacts/{contact_id}", json=data)
