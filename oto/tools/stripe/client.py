@@ -526,7 +526,30 @@ class StripeClient:
         client, `max_redemptions`/`expires_at` bornent l'usage,
         `restrictions` (dict, ex. `{"minimum_amount": 5000,
         "minimum_amount_currency": "eur"}` ou
-        `{"first_time_transaction": True}`) borne QUAND il s'applique."""
+        `{"first_time_transaction": True}`) borne QUAND il s'applique.
+
+        ⚠️ **Vérifié en LIVE le 2026-08-23** contre un vrai compte test (API
+        version de compte `2026-07-29.dahlia`, la version par défaut d'un
+        compte neuf) : un `coupon=<id>` À PLAT est REJETÉ (`400
+        parameter_unknown: coupon`) — cette version d'API a remplacé le champ
+        par un objet imbriqué `promotion` (`promotion[type]=coupon`,
+        `promotion[coupon]=<id>`), miroir de la forme de RÉPONSE que rendent
+        déjà `list_promotion_codes`/`get_promotion_code` sur cette même
+        version (`promotion: {coupon, type}`, plus de `coupon` à plat non
+        plus en lecture). Tous les autres champs (`code`, `customer`,
+        `max_redemptions`, `expires_at`, `restrictions`, `metadata`)
+        continuent de fonctionner tels quels à côté. La signature de CETTE
+        méthode reste `coupon=<id>` côté appelant (rien ne change pour
+        `oto_mcp/tools/stripe.py`) — c'est ICI, au moment d'émettre la
+        requête, que `coupon` est transformé en `promotion`. Un compte
+        épinglé sur une version d'API ANTÉRIEURE à ce changement (via le
+        champ credential `api_version`) pourrait attendre l'ancienne forme à
+        plat à la place — non vérifié faute d'un tel compte disponible ;
+        cf. le docstring de tête du module sur ce risque."""
+        body = dict(body)
+        coupon = body.pop("coupon", None)
+        if coupon is not None:
+            body["promotion"] = {"type": "coupon", "coupon": coupon}
         return self._post("/v1/promotion_codes", body)
 
     def update_promotion_code(self, promotion_code_id: str, **body: Any) -> Any:

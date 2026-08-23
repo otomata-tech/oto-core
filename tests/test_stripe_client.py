@@ -184,15 +184,30 @@ def test_update_coupon_posts_to_the_coupon_id(capture):
 
 
 def test_create_promotion_code_links_a_coupon_to_a_typed_code(capture):
+    """⚠️ Régression vérifiée en LIVE (2026-08-23) : la version d'API par
+    défaut d'un compte neuf REJETTE un `coupon=<id>` à plat
+    (`400 parameter_unknown: coupon`) — elle attend `promotion[type]=coupon`
+    + `promotion[coupon]=<id>`. La méthode continue de prendre `coupon=`
+    côté appelant ; c'est elle qui nid le champ sur le fil."""
     _client().create_promotion_code(coupon="cp_1", code="LAUNCH20",
                                      restrictions={"first_time_transaction": True})
     assert capture["method"] == "POST"
     assert capture["url"] == "https://api.stripe.com/v1/promotion_codes"
     b = _body(capture)
-    assert b["coupon"] == "cp_1"
+    assert "coupon" not in b, "la forme à plat est rejetée par l'API en live"
+    assert b["promotion[type]"] == "coupon"
+    assert b["promotion[coupon]"] == "cp_1"
     assert b["code"] == "LAUNCH20"
     # syntaxe bracket, comme tout dict imbriqué (cf. _encode)
     assert b["restrictions[first_time_transaction]"] == "true"
+
+
+def test_create_promotion_code_without_a_coupon_sends_no_promotion_field(capture):
+    """Un appel mal formé (aucun `coupon`) ne doit pas fabriquer un
+    `promotion` vide ou cassé — laisser Stripe lui-même refuser un
+    `coupon` manquant, avec son propre message."""
+    _client().create_promotion_code(code="X")
+    assert "promotion" not in _body(capture)
 
 
 def test_update_promotion_code_can_deactivate_without_deleting(capture):
