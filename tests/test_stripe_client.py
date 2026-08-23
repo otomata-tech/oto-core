@@ -164,6 +164,46 @@ def test_subscription_items_are_scoped_to_their_subscription(capture):
     assert _query(capture) == {"subscription": "sub_1", "limit": 50}
 
 
+# --- coupons & promotion codes -------------------------------------------------
+
+def test_create_coupon_posts_to_v1_coupons(capture):
+    _client().create_coupon(percent_off=20, duration="once", name="LAUNCH20")
+    assert capture["method"] == "POST"
+    assert capture["url"] == "https://api.stripe.com/v1/coupons"
+    b = _body(capture)
+    assert b["percent_off"] == 20
+    assert b["duration"] == "once"
+    assert b["name"] == "LAUNCH20"
+
+
+def test_update_coupon_posts_to_the_coupon_id(capture):
+    _client().update_coupon("cp_1", name="renamed")
+    assert capture["method"] == "POST"
+    assert capture["url"] == "https://api.stripe.com/v1/coupons/cp_1"
+    assert _body(capture)["name"] == "renamed"
+
+
+def test_create_promotion_code_links_a_coupon_to_a_typed_code(capture):
+    _client().create_promotion_code(coupon="cp_1", code="LAUNCH20",
+                                     restrictions={"first_time_transaction": True})
+    assert capture["method"] == "POST"
+    assert capture["url"] == "https://api.stripe.com/v1/promotion_codes"
+    b = _body(capture)
+    assert b["coupon"] == "cp_1"
+    assert b["code"] == "LAUNCH20"
+    # syntaxe bracket, comme tout dict imbriqué (cf. _encode)
+    assert b["restrictions[first_time_transaction]"] == "true"
+
+
+def test_update_promotion_code_can_deactivate_without_deleting(capture):
+    """Aucune suppression n'existe dans ce client (cf. le docstring de tête du
+    module) — révoquer un code passe par `active=False`."""
+    _client().update_promotion_code("promo_1", active=False)
+    assert capture["method"] == "POST"
+    assert capture["url"] == "https://api.stripe.com/v1/promotion_codes/promo_1"
+    assert _body(capture)["active"] == "false"
+
+
 # --- search : sept ressources, pas une de plus ---------------------------------
 
 def test_search_builds_the_resource_path(capture):

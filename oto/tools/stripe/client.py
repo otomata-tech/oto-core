@@ -490,6 +490,25 @@ class StripeClient:
         """GET /v1/coupons/{id}."""
         return self._get(f"/v1/coupons/{coupon_id}", **params)
 
+    def create_coupon(self, **body: Any) -> Any:
+        """POST /v1/coupons — `duration` (once | repeating | forever) requis,
+        plus `percent_off` OU `amount_off`+`currency` (Stripe refuse les deux
+        à la fois). `duration_in_months` requis si `duration="repeating"`.
+        `id` fixe l'identifiant (sinon Stripe en génère un) ; `name` est ce
+        qu'un client voit sur sa facture. `max_redemptions`/`redeem_by`
+        bornent l'usage dans le temps/en volume."""
+        return self._post("/v1/coupons", body)
+
+    def update_coupon(self, coupon_id: str, **body: Any) -> Any:
+        """POST /v1/coupons/{id} — un Coupon Stripe n'a QUE `name` et
+        `metadata` de modifiables après création (montant/durée/
+        redemptions sont figés, comme le montant d'un `Price`) ; ni
+        suppression ni désactivation n'existent dans ce client (cf. le
+        docstring de tête du module) — un coupon dont on ne veut plus se
+        retire en révoquant ses `promotion_code`s (`update_promotion_code`,
+        `active=False`), pas en le touchant lui."""
+        return self._post(f"/v1/coupons/{coupon_id}", body)
+
     def list_promotion_codes(self, **params: Any) -> Any:
         """GET /v1/promotion_codes — filtres `code`, `coupon`, `active`,
         `customer`, `created`."""
@@ -498,6 +517,25 @@ class StripeClient:
     def get_promotion_code(self, promotion_code_id: str, **params: Any) -> Any:
         """GET /v1/promotion_codes/{id}."""
         return self._get(f"/v1/promotion_codes/{promotion_code_id}", **params)
+
+    def create_promotion_code(self, **body: Any) -> Any:
+        """POST /v1/promotion_codes — `coupon` (requis) est la règle de
+        remise ; ce que ce endpoint ajoute est le CODE qu'un client tape
+        réellement au paiement. `code` fixe le texte (majuscules/chiffres —
+        Stripe le génère sinon), `customer` restreint le code à un seul
+        client, `max_redemptions`/`expires_at` bornent l'usage,
+        `restrictions` (dict, ex. `{"minimum_amount": 5000,
+        "minimum_amount_currency": "eur"}` ou
+        `{"first_time_transaction": True}`) borne QUAND il s'applique."""
+        return self._post("/v1/promotion_codes", body)
+
+    def update_promotion_code(self, promotion_code_id: str, **body: Any) -> Any:
+        """POST /v1/promotion_codes/{id} — seuls `active` et `metadata`
+        sont modifiables après création (le code, le coupon lié et les
+        restrictions sont figés). `active=False` est la façon de RÉVOQUER
+        un code sans le supprimer (aucune suppression n'existe dans ce
+        client) — les redemptions déjà faites ne sont pas affectées."""
+        return self._post(f"/v1/promotion_codes/{promotion_code_id}", body)
 
     # ================================================================
     # Checkout — sessions hébergées
