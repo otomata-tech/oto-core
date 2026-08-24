@@ -10,12 +10,45 @@ endpoint it declares is wrapped here, one method per endpoint.
 Auth: Personal Access Token (dashboard → Settings → Account → API), sent as
 `Authorization: Bearer …`. Base URL `https://api.snitcher.com/v1`. Rate limit:
 **60 requests/minute per token** (429 `{"message": "Too Many Attempts."}` past
-it). Responses wrap payloads in `{"data": …}` (+ `links`/`meta` pagination on
-lists); methods return the parsed JSON body as-is, unwrapping nothing — the
-`meta.current_page`/`last_page` block is how a caller knows to paginate.
+it). Methods return the parsed JSON body as-is, unwrapping nothing.
 
-Everything below the spec is UNVERIFIED against a live key so far — spec-only
-until a live pass stamps this docstring otherwise.
+**Live-tested 2026-08-24** against a real trial-tier token (workspace
+tulina.ai): 24 of 27 endpoints exercised — every read, the full tag cycle
+(create → attach → verified on the organisation → detach), the full custom
+-field cycle (definition create/get/update/list, value set/set_many/clear,
+definition delete), and a no-op `update_workspace`. Deliberately NOT
+exercised: `reveal_contact_email` (spends a credit), `create_workspace`/
+`delete_workspace`/`invite_user` (account-mutating). Findings:
+
+⚠️ **The response envelope is INCONSISTENT — do not assume `{"data": …}`.**
+Confirmed live: list endpoints return Laravel-style TOP-LEVEL pagination
+(`success`, `current_page`, `last_page`, `total`, `per_page`, `data: […]` —
+no `meta` block despite the spec's Pagination component); `get_organisation`
+and every custom-field definition/value op return the BARE object with no
+wrapper at all; tag add/remove return `{"success", "message"}`; the DELETE
+endpoints return an empty body (→ `None` here).
+
+⚠️ **Nested FilterGroups are REJECTED by the live API** even though the spec
+declares `conditions` items as `FilterCondition | FilterGroup` — a nested
+group gets 422 `filters.conditions.N.field field is required`. Flat
+conditions under one top-level operator only.
+
+⚠️ **`filter_organisations` accepts a NARROW, visit-centric field set** the
+spec nowhere enumerates. Probed live (32 candidates): accepted = `last_seen`,
+`first_seen`, `tag`, `sessions`, `pageviews`, `time_on_site`, `url`,
+`referrer`, `source`. Rejected (422 "Invalid filter field") = every
+firmographic guess (`name`, `website`, `domain`, `industry`, `size`,
+`country`, `employees`, `annual_revenue`, `icp_tier`…) AND custom-field keys
+in three spellings (`<key>`, `custom_fields.<key>`, `custom.<key>`). For
+firmographic narrowing use `list_organisations(name=…)` or segments.
+
+Confirmed as spec'd: `set_custom_field_values` auto-creates unknown keys
+with the type inferred from the value (a `42` created a `number` field);
+`list_custom_field_values` also returns the FIXED system fields (name,
+website, description…, `source: "fixed"`) alongside custom ones; contact
+emails read `"[not-revealed]"` until the paid reveal; `list_contacts` by
+`domain` works for any company, not just identified visitors (folk.app
+returned 25 contacts).
 
 ⚠️ `reveal_contact_email` is the one call here that SPENDS credits (it
 un-hides a contact's email). Every other method is a read or a free write
@@ -125,11 +158,15 @@ class SnitcherClient:
     ) -> Dict[str, Any]:
         """`POST /workspaces/{ws}/organisations` — advanced filtering.
 
-        `filters` is a FilterGroup: `{"operator": "AND"|"OR", "conditions":
-        [{"field", "comparison", "value"?, "unit"?} | nested FilterGroup, …]}`.
-        Comparisons: equal/not_equal/contains/not_contains/starts_with/
-        ends_with/doesnt_start_with/doesnt_end_with/in/not_in/between/
-        not_between/greater_than/less_than/greater_than_or_equal/
+        `filters`: `{"operator": "AND"|"OR", "conditions": [{"field",
+        "comparison", "value"?, "unit"?}, …]}` — ⚠️ FLAT conditions only:
+        nesting a FilterGroup inside `conditions` is spec'd but 422s live
+        (confirmed 2026-08-24). Fields accepted live: last_seen, first_seen,
+        tag, sessions, pageviews, time_on_site, url, referrer, source —
+        firmographics and custom-field keys are rejected (see module
+        docstring). Comparisons: equal/not_equal/contains/not_contains/
+        starts_with/ends_with/doesnt_start_with/doesnt_end_with/in/not_in/
+        between/not_between/greater_than/less_than/greater_than_or_equal/
         less_than_or_equal/less_than_x_units_ago/more_than_x_units_ago
         (those two need numeric `value` + `unit` second..year)/set/not_set/
         is_true/is_false.
