@@ -584,8 +584,16 @@ class LemlistClient:
         Returns `{enrichmentId, enrichmentStatus, input, data}`. `enrichmentStatus`
         is the field to branch on — `in-progress` (HTTP 202), `done` (200) or
         `not-found` (404, a legitimate payload rather than an error, so it is
-        returned instead of raised). `data` holds the found fields once done,
-        e.g. `{"email": {"email": "john@lempire.co", "notFound": false}}`.
+        returned instead of raised). `data` holds the found fields once done —
+        shapes observed live, beyond the published schema: `email` carries
+        `email` plus a verification `status` (`deliverable`/`undeliverable`),
+        `phone` carries `phone`, `linkedin` carries a full profile, or `{}`
+        when it could not be resolved.
+
+        Two live caveats. `notFound` is not reliable — seen `false` on a
+        payload with no number. And `done` does not guarantee the payload has
+        landed: lemlist sometimes flips the status first and fills `data` on a
+        later poll, so re-read once before concluding nothing was found.
         """
         return self._request("GET", f"enrich/{enrich_id}", tolerate=(404,))
 
@@ -604,6 +612,10 @@ class LemlistClient:
         Same actions as `enrich`, but the identity comes from the existing lead
         and the result is written back onto it. Returns `{"id": "enr_..."}`,
         pollable with `get_enrichment`.
+
+        Only accepted for a lead still AWAITING REVIEW: a reviewed lead — every
+        lead in a campaign without review-before-send — gets
+        `400 {"error": "lemrich is not available for lead reviewed"}`.
         """
         params = self._flag_params(
             findEmail=find_email,
