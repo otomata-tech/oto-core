@@ -105,3 +105,130 @@ def test_add_lead_variables_sends_query_params_not_body(monkeypatch):
     assert captured["url"].endswith("/leads/lea_1/variables")
     assert captured["params"] == {"customField1": "Lemlist", "customField2": "Will Rule"}
     assert "json" not in captured
+
+
+# --- enrichissement ----------------------------------------------------------
+
+
+def _capture(monkeypatch, status=200, body=None):
+    captured = {}
+
+    def fake_request(method, url, headers=None, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return _Resp(status, {} if body is None else body)
+
+    monkeypatch.setattr(lm.requests, "request", fake_request)
+    return captured
+
+
+def test_enrich_sends_actions_and_identity_as_query_params(monkeypatch):
+    captured = _capture(monkeypatch, body={"id": "enr_1"})
+    c = lm.LemlistClient(api_key="k")
+
+    out = c.enrich(
+        first_name="John", last_name="Lempire", company_domain="lempire.com",
+        find_email=True, find_phone=True,
+    )
+
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/enrich")
+    # Query params, pas de corps JSON — c'est le contrat de cet endpoint.
+    assert "json" not in captured
+    params = captured["params"]
+    # Les booléens partent en "true" : `True` se sérialiserait "True".
+    assert params["findEmail"] == "true" and params["findPhone"] == "true"
+    assert "verifyEmail" not in params and "linkedinEnrichment" not in params
+    assert params["firstName"] == "John"
+    assert params["companyDomain"] == "lempire.com"
+    assert out == {"id": "enr_1"}
+
+
+def test_enrich_without_any_action_raises_before_the_call(monkeypatch):
+    captured = _capture(monkeypatch)
+    c = lm.LemlistClient(api_key="k")
+
+    with pytest.raises(ValueError):
+        c.enrich(email="a@acme.fr")
+
+    assert captured == {}  # rien n'est parti : pas de crédit dépensé
+
+
+def test_get_enrichment_returns_not_found_body_instead_of_raising(monkeypatch):
+    # 404 porte ici une charge utile légitime (`enrichmentStatus: not-found`),
+    # pas une erreur : la lever masquerait un état terminal derrière une exception.
+    _capture(monkeypatch, status=404, body={
+        "enrichmentId": "enr_x", "enrichmentStatus": "not-found",
+        "error": "Enrichment not found", "data": {},
+    })
+    c = lm.LemlistClient(api_key="k")
+
+    out = c.get_enrichment("enr_x")
+
+    assert out["enrichmentStatus"] == "not-found"
+
+
+def test_get_enrichment_in_progress_202_is_a_normal_body(monkeypatch):
+    _capture(monkeypatch, status=202, body={
+        "enrichmentId": "enr_1", "enrichmentStatus": "in-progress", "data": {},
+    })
+    c = lm.LemlistClient(api_key="k")
+
+    assert c.get_enrichment("enr_1")["enrichmentStatus"] == "in-progress"
+
+
+def test_get_enrichment_still_raises_on_a_real_error(monkeypatch):
+    _capture(monkeypatch, status=401, body={"error": "unauthorized"})
+    c = lm.LemlistClient(api_key="k")
+
+    with pytest.raises(UpstreamHTTPError) as e:
+        c.get_enrichment("enr_1")
+    assert e.value.status_code == 401
+
+
+def test_enrich_lead_posts_to_the_lead_path(monkeypatch):
+    captured = _capture(monkeypatch, body={"id": "enr_2"})
+    c = lm.LemlistClient(api_key="k")
+
+    c.enrich_lead("lea_1", linkedin_enrichment=True)
+
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/leads/lea_1/enrich")
+    assert captured["params"] == {"linkedinEnrichment": "true"}
+
+
+def test_enrich_lead_without_any_action_raises_before_the_call(monkeypatch):
+    captured = _capture(monkeypatch)
+    c = lm.LemlistClient(api_key="k")
+
+    with pytest.raises(ValueError):
+        c.enrich_lead("lea_1")
+
+    assert captured == {}
+
+
+def test_bulk_enrich_posts_a_json_array(monkeypatch):
+    captured = _capture(monkeypatch, body=[{"id": "enr_1"}])
+    c = lm.LemlistClient(api_key="k")
+
+    items = [{"input": {"email": "a@acme.fr"}, "enrichmentRequests": ["verify"]}]
+    out = c.bulk_enrich(items)
+
+    assert captured["url"].endswith("/v2/enrichments/bulk")
+    assert captured["json"] == items
+    assert out == [{"id": "enr_1"}]
+
+
+def test_bulk_action_vocabulary_is_not_a_snake_case_of_the_v1_flags():
+    # v2 dit `verify`, v1 dit `verifyEmail` : une conversion mécanique enverrait
+    # une action que lemlist ne connaît pas.
+    assert lm.LemlistClient.ENRICH_BULK_ACTIONS["verify_email"] == "verify"
+    assert lm.LemlistClient.ENRICH_FLAGS["verify_email"] == "verifyEmail"
+
+
+def test_requests_carry_a_timeout(monkeypatch):
+    captured = _capture(monkeypatch, body={"id": "enr_1"})
+    c = lm.LemlistClient(api_key="k")
+
+    c.enrich(email="a@acme.fr", find_phone=True)
+
+    assert captured["timeout"] == lm._HTTP_TIMEOUT
