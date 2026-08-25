@@ -531,7 +531,11 @@ class AirtableClient:
         """`PATCH /meta/bases/{baseId}/tables/{tableId}/fields/{fieldId}`.
 
         Seuls `name` et `description` sont modifiables : l'API **ne change ni le type ni
-        les `options`** d'un champ existant (il faut créer un nouveau champ).
+        les `options`** d'un champ existant. Vérifié en live le 2026-08-25 — un PATCH
+        portant `options` rend `422 INVALID_REQUEST_UNKNOWN, "Changing a field's type or
+        number precision is not currently supported."`, et il n'existe **aucun**
+        `DELETE …/fields/{id}` (404). Une option de select ajoutée par erreur (via
+        `typecast`) ne se retire donc QUE dans l'interface Airtable.
         Scope `schema.bases:write`.
         """
         body = self._clean({"name": name, "description": description})
