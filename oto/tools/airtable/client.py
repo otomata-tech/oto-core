@@ -120,6 +120,13 @@ class AirtableClient:
         return {k: v for k, v in params.items() if v is not None}
 
     @staticmethod
+    def _qbool(value: Optional[bool]) -> Optional[str]:
+        """Booléen destiné à la QUERY STRING — `requests` sérialise `True` en `"True"`,
+        qu'Airtable ne reconnaît pas (les clients de référence coercent en `true`/`1`).
+        Ne concerne que les params GET ; dans un corps JSON le booléen part tel quel."""
+        return None if value is None else ("true" if value else "false")
+
+    @staticmethod
     def _seg(value: str) -> str:
         """Un segment d'URL. Un NOM de table ou de champ peut contenir espaces et `/`."""
         return quote(str(value), safe="")
@@ -192,7 +199,7 @@ class AirtableClient:
             "pageSize": page_size,
             "view": view,
             "offset": offset,
-            "returnFieldsByFieldId": return_fields_by_field_id,
+            "returnFieldsByFieldId": self._qbool(return_fields_by_field_id),
             "fields[]": fields,
             "recordMetadata[]": record_metadata,
             **self._cell_format_params(cell_format, time_zone, user_locale),
@@ -221,7 +228,7 @@ class AirtableClient:
     ) -> Dict[str, Any]:
         """`GET /{baseId}/{table}/{recordId}` — un record avec tous ses champs."""
         params = self._clean({
-            "returnFieldsByFieldId": return_fields_by_field_id,
+            "returnFieldsByFieldId": self._qbool(return_fields_by_field_id),
             **self._cell_format_params(cell_format, time_zone, user_locale),
         })
         return self._request(
