@@ -86,19 +86,32 @@ class LemlistClient:
         encoded = base64.b64encode(credentials.encode()).decode()
         return f"Basic {encoded}"
 
-    def _request(self, method: str, endpoint: str, **kwargs) -> Any:
-        """Make API request with rate limiting."""
+    def _request(self, method: str, endpoint: str, *, tolerate: tuple = (), **kwargs) -> Any:
+        """Make API request with rate limiting.
+
+        `tolerate` lists status codes whose body is a legitimate payload rather
+        than an error — used by the enrichment poll, where lemlist answers 404
+        with `{"enrichmentStatus": "not-found", ...}`.
+        """
         self._rate_limit()
 
         url = f"{self.BASE_URL}/{endpoint}"
         headers = {"Authorization": self._get_auth_header()}
 
+        kwargs.setdefault("timeout", _HTTP_TIMEOUT)
         response = requests.request(method, url, headers=headers, **kwargs)
-        raise_for_upstream(response, service="lemlist")
+        if response.status_code not in tolerate:
+            raise_for_upstream(response, service="lemlist")
 
         if response.content:
             return response.json()
         return {}
+
+    @staticmethod
+    def _flag_params(**flags: bool) -> Dict[str, str]:
+        """Lemlist reads boolean flags as query strings — `True` would serialize
+        as `"True"`, so only the enabled ones are sent, as `"true"`."""
+        return {k: "true" for k, v in flags.items() if v}
 
     # --- Campaigns ---
 
@@ -436,14 +449,13 @@ class LemlistClient:
         Returns the created lead, including `_id` (used by `launch_lead` and
         `add_lead_variables`).
         """
-        flags = {
-            "deduplicate": deduplicate,
-            "linkedinEnrichment": linkedin_enrichment,
-            "findEmail": find_email,
-            "verifyEmail": verify_email,
-            "findPhone": find_phone,
-        }
-        params = {k: "true" for k, v in flags.items() if v}
+        params = self._flag_params(
+            deduplicate=deduplicate,
+            linkedinEnrichment=linkedin_enrichment,
+            findEmail=find_email,
+            verifyEmail=verify_email,
+            findPhone=find_phone,
+        )
         return self._request(
             "POST", f"campaigns/{campaign_id}/leads/", json=lead, params=params,
         )
@@ -486,6 +498,161 @@ class LemlistClient:
         , timeout=_HTTP_TIMEOUT)
         response.raise_for_status()
         return response.text
+
+    # --- Enrichment ---
+    #
+    # Standalone enrichment, distinct from the flags on `create_lead` (which only
+    # enrich a lead on its way into a campaign). Every call is ASYNC: the POST
+    # returns an id in ~1s, the work runs server-side, and `get_enrichment` polls
+    # it. Each action spends lemlist enrichment credits.
+
+    #: Enrichment actions, as the v1 query flags (`/enrich`, `/leads/{id}/enrich`).
+    ENRICH_FLAGS = {
+        "find_email": "findEmail",
+        "verify_email": "verifyEmail",
+        "linkedin_enrichment": "linkedinEnrichment",
+        "find_phone": "findPhone",
+    }
+    #: The same actions as the v2 bulk vocabulary — deliberately NOT a snake_case
+    #: of the v1 names: lemlist calls email verification `verify`, not `verify_email`.
+    ENRICH_BULK_ACTIONS = {
+        "find_email": "find_email",
+        "verify_email": "verify",
+        "linkedin_enrichment": "linkedin_enrichment",
+        "find_phone": "find_phone",
+    }
+
+    def enrich(
+        self,
+        *,
+        email: str = None,
+        linkedin_url: str = None,
+        first_name: str = None,
+        last_name: str = None,
+        company_name: str = None,
+        company_domain: str = None,
+        find_email: bool = False,
+        verify_email: bool = False,
+        linkedin_enrichment: bool = False,
+        find_phone: bool = False,
+        webhook_url: str = None,
+    ) -> Dict[str, Any]:
+        """Submit a standalone enrichment (POST /enrich) — no campaign, no lead.
+
+        Args:
+            email, linkedin_url, first_name, last_name, company_name,
+                company_domain: the identity to enrich. All optional on paper;
+                lemlist matches on whatever it gets, so a LinkedIn URL or a
+                name + company domain is what actually resolves.
+            find_email: find a verified email.
+            verify_email: verify the email passed in (debounce).
+            linkedin_enrichment: run the LinkedIn enrichment.
+            find_phone: find a phone number.
+            webhook_url: notified when the enrichment completes, instead of polling.
+
+        At least one action is required — lemlist answers 400 otherwise.
+
+        Returns `{"id": "enr_..."}`; pass that id to `get_enrichment`.
+        """
+        params = self._flag_params(
+            findEmail=find_email,
+            verifyEmail=verify_email,
+            linkedinEnrichment=linkedin_enrichment,
+            findPhone=find_phone,
+        )
+        if not params:
+            raise ValueError(
+                "no enrichment requested — set at least one of find_email, "
+                "verify_email, linkedin_enrichment, find_phone"
+            )
+        params.update({
+            k: v for k, v in {
+                "email": email,
+                "linkedinUrl": linkedin_url,
+                "firstName": first_name,
+                "lastName": last_name,
+                "companyName": company_name,
+                "companyDomain": company_domain,
+                "webhookUrl": webhook_url,
+            }.items() if v is not None
+        })
+        return self._request("POST", "enrich", params=params)
+
+    def get_enrichment(self, enrich_id: str) -> Dict[str, Any]:
+        """Poll an enrichment (GET /enrich/{enrichId}).
+
+        Returns `{enrichmentId, enrichmentStatus, input, data}`. `enrichmentStatus`
+        is the field to branch on — `in-progress` (HTTP 202), `done` (200) or
+        `not-found` (404, a legitimate payload rather than an error, so it is
+        returned instead of raised). `data` holds the found fields once done —
+        shapes observed live, beyond the published schema: `email` carries
+        `email` plus a verification `status` (`deliverable`/`undeliverable`),
+        `phone` carries `phone`, `linkedin` carries a full profile, or `{}`
+        when it could not be resolved.
+
+        Two live caveats. `notFound` is not reliable — seen `false` on a
+        payload with no number. And `done` does not guarantee the payload has
+        landed: lemlist sometimes flips the status first and fills `data` on a
+        later poll, so re-read once before concluding nothing was found.
+        """
+        return self._request("GET", f"enrich/{enrich_id}", tolerate=(404,))
+
+    def enrich_lead(
+        self,
+        lead_id: str,
+        *,
+        find_email: bool = False,
+        verify_email: bool = False,
+        linkedin_enrichment: bool = False,
+        find_phone: bool = False,
+        webhook_url: str = None,
+    ) -> Dict[str, Any]:
+        """Enrich a lead already in a campaign (POST /leads/{leadId}/enrich).
+
+        Same actions as `enrich`, but the identity comes from the existing lead
+        and the result is written back onto it. Returns `{"id": "enr_..."}`,
+        pollable with `get_enrichment`.
+
+        Only accepted for a lead still AWAITING REVIEW: a reviewed lead — every
+        lead in a campaign without review-before-send — gets
+        `400 {"error": "lemrich is not available for lead reviewed"}`.
+        """
+        params = self._flag_params(
+            findEmail=find_email,
+            verifyEmail=verify_email,
+            linkedinEnrichment=linkedin_enrichment,
+            findPhone=find_phone,
+        )
+        if not params:
+            raise ValueError(
+                "no enrichment requested — set at least one of find_email, "
+                "verify_email, linkedin_enrichment, find_phone"
+            )
+        if webhook_url:
+            params["webhookUrl"] = webhook_url
+        return self._request("POST", f"leads/{lead_id}/enrich", params=params)
+
+    def bulk_enrich(
+        self, items: List[Dict[str, Any]], webhook_url: str = None,
+    ) -> List[Dict[str, Any]]:
+        """Submit several enrichments in one call (POST /v2/enrichments/bulk).
+
+        Args:
+            items: one entry per person, each
+                `{"input": {linkedinUrl|email|firstName|lastName|companyName|
+                companyDomain}, "enrichmentRequests": [...], "metadata": {...}}`.
+                `enrichmentRequests` uses the v2 vocabulary — `find_email`,
+                `find_phone`, `verify`, `linkedin_enrichment` (see
+                `ENRICH_BULK_ACTIONS`). `metadata` is echoed back, use it to
+                match ids to your own rows.
+            webhook_url: notified as each enrichment completes.
+
+        Returns one entry per item, in order — `{"id": "enr_...", "metadata": ...}`
+        or `{"error": "MISSING_INPUTS", "metadata": ...}`. Unlike a FullEnrich
+        job, a bulk submit yields N ids, not one: poll each with `get_enrichment`.
+        """
+        params = {"webhookUrl": webhook_url} if webhook_url else None
+        return self._request("POST", "v2/enrichments/bulk", json=items, params=params)
 
     # --- Activities & Stats ---
 
