@@ -46,7 +46,11 @@ class TavilyClient:
     # --- transport ----------------------------------------------------------
 
     def _request(self, method: str, path: str, *, timeout: int = 60, **kwargs) -> Dict[str, Any]:
-        resp = self.session.request(method, f"{self.BASE_URL}{path}", timeout=timeout, **kwargs)
+        # `timeout` (int) = budget de LECTURE seulement ; le connect est borné à 10 s
+        # (convention repo (connexion, lecture) — un host injoignable ne doit pas
+        # bloquer 160 s le temps du budget crawl).
+        resp = self.session.request(method, f"{self.BASE_URL}{path}",
+                                    timeout=(10, timeout), **kwargs)
         raise_for_upstream(resp, service="tavily")
         return resp.json() if resp.content else {}
 
