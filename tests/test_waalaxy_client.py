@@ -92,6 +92,29 @@ def test_add_prospects_guards(capture, prospects, list_id, msg):
     assert "method" not in capture
 
 
+def test_request_passes_timeout(capture):
+    _client().test_connection()
+    assert capture["kwargs"]["timeout"] == wc.WaalaxyClient._HTTP_TIMEOUT
+
+
+def test_build_body_is_pure_and_matches_send(capture):
+    body = wc.WaalaxyClient.build_add_prospects_body([{"url": "u"}], "l1", origin="x", campaign_id="c")
+    assert body == {"prospects": [{"url": "u"}], "prospectListId": "l1", "origin": {"name": "x"}, "campaignId": "c"}
+    assert "method" not in capture
+    _client().add_prospects([{"url": "u"}], "l1", origin="x", campaign_id="c")
+    assert capture["kwargs"]["json"] == body
+
+
+def test_non_json_2xx_is_upstream_error(monkeypatch):
+    class _Html(_Resp):
+        def json(self):
+            raise ValueError("no json")
+    monkeypatch.setattr(wc.requests, "request", lambda *a, **k: _Html(200, "<html>maintenance</html>"))
+    with pytest.raises(UpstreamHTTPError) as ei:
+        _client().list_campaigns()
+    assert ei.value.status_code == 200
+
+
 def test_upstream_error_is_typed(monkeypatch):
     monkeypatch.setattr(
         wc.requests, "request",

@@ -41,6 +41,7 @@ import requests
 
 from ...config import require_secret
 from ..common import raise_for_upstream
+from ..common.errors import UpstreamHTTPError
 
 IMPORT_CODES = (
     "success", "duplicated_prospect", "prospect_successfully_moved_to_another_list",
@@ -70,7 +71,14 @@ class WaalaxyClient:
         resp = requests.request(method, f"{self.BASE_URL}{path}", headers=self._headers(),
                                 json=json, timeout=self._HTTP_TIMEOUT)
         raise_for_upstream(resp, service="waalaxy")
-        return resp.json() if resp.content else None
+        if not resp.content:
+            return None
+        try:
+            return resp.json()
+        except ValueError:
+            # A 2xx that is not JSON (gateway HTML page…) is an upstream fault, not
+            # a caller error — keep it out of the ValueError → INVALID_PARAMS path.
+            raise UpstreamHTTPError(resp.status_code, resp.text[:500], service="waalaxy")
 
     def test_connection(self) -> Any:
         """`GET /integrations/test` — the verify probe. Returns the bare literal `true`."""
@@ -85,6 +93,54 @@ class WaalaxyClient:
         """`GET /campaigns/getAll` — `{total, campaigns: [{_id, name}]}`.
         ⚠️ Only `running`/`paused` campaigns; archived/finished ones are absent."""
         return self._request("GET", "/campaigns/getAll")
+
+    @staticmethod
+    def build_add_prospects_body(
+        prospects: List[Dict[str, Any]],
+        prospect_list_id: str,
+        *,
+        origin: str = "oto",
+        campaign_id: Optional[str] = None,
+        can_create_duplicates: Optional[bool] = None,
+        move_duplicates_to_other_list: Optional[bool] = None,
+        should_overwrite_custom_profile_data: Optional[bool] = None,
+        add_existing_prospect_in_campaign: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Pure: validate and build the exact wire body of `add_prospects`
+        (no network). Shared by the real call and the MCP layer's dry_run so a
+        preview can never diverge from what is POSTed."""
+        if not prospects:
+            raise ValueError("prospects must contain at least one prospect")
+        if not prospect_list_id:
+            raise ValueError("prospect_list_id is required")
+        if not origin:
+            raise ValueError("origin must be a non-empty label")
+        for i, p in enumerate(prospects):
+            if not isinstance(p, dict) or not p.get("url"):
+                raise ValueError(f"prospects[{i}] must have a LinkedIn profile `url`")
+            for v in p.get("customVariables") or ():
+                if not isinstance(v, dict) or "label" not in v or "value" not in v:
+                    raise ValueError(f"prospects[{i}].customVariables items need `label` and `value`")
+                if len(str(v["value"])) > CUSTOM_VARIABLE_MAX_LEN:
+                    raise ValueError(
+                        f"prospects[{i}] custom variable {v['label']!r} exceeds "
+                        f"{CUSTOM_VARIABLE_MAX_LEN} chars")
+        body: Dict[str, Any] = {
+            "prospects": prospects,
+            "prospectListId": prospect_list_id,
+            "origin": {"name": origin},
+        }
+        if campaign_id:
+            body["campaignId"] = campaign_id
+        for key, val in (
+            ("canCreateDuplicates", can_create_duplicates),
+            ("moveDuplicatesToOtherList", move_duplicates_to_other_list),
+            ("shouldOverwriteCustomProfileData", should_overwrite_custom_profile_data),
+            ("addExistingProspectInCampaign", add_existing_prospect_in_campaign),
+        ):
+            if val is not None:
+                body[key] = bool(val)
+        return body
 
     def add_prospects(
         self,
@@ -118,35 +174,11 @@ class WaalaxyClient:
         custom variable value over 1000 chars (the API would 200 with a
         per-item error code; failing early is cheaper).
         """
-        if not prospects:
-            raise ValueError("prospects must contain at least one prospect")
-        if not prospect_list_id:
-            raise ValueError("prospect_list_id is required")
-        if not origin:
-            raise ValueError("origin must be a non-empty label")
-        for i, p in enumerate(prospects):
-            if not isinstance(p, dict) or not p.get("url"):
-                raise ValueError(f"prospects[{i}] must have a LinkedIn profile `url`")
-            for v in p.get("customVariables") or ():
-                if not isinstance(v, dict) or "label" not in v or "value" not in v:
-                    raise ValueError(f"prospects[{i}].customVariables items need `label` and `value`")
-                if len(str(v["value"])) > CUSTOM_VARIABLE_MAX_LEN:
-                    raise ValueError(
-                        f"prospects[{i}] custom variable {v['label']!r} exceeds "
-                        f"{CUSTOM_VARIABLE_MAX_LEN} chars")
-        body: Dict[str, Any] = {
-            "prospects": prospects,
-            "prospectListId": prospect_list_id,
-            "origin": {"name": origin},
-        }
-        if campaign_id:
-            body["campaignId"] = campaign_id
-        for key, val in (
-            ("canCreateDuplicates", can_create_duplicates),
-            ("moveDuplicatesToOtherList", move_duplicates_to_other_list),
-            ("shouldOverwriteCustomProfileData", should_overwrite_custom_profile_data),
-            ("addExistingProspectInCampaign", add_existing_prospect_in_campaign),
-        ):
-            if val is not None:
-                body[key] = bool(val)
+        body = self.build_add_prospects_body(
+            prospects, prospect_list_id, origin=origin, campaign_id=campaign_id,
+            can_create_duplicates=can_create_duplicates,
+            move_duplicates_to_other_list=move_duplicates_to_other_list,
+            should_overwrite_custom_profile_data=should_overwrite_custom_profile_data,
+            add_existing_prospect_in_campaign=add_existing_prospect_in_campaign,
+        )
         return self._request("POST", "/prospects/addProspectFromIntegration", json=body)
