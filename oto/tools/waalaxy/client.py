@@ -9,8 +9,9 @@ in a campaign). There is NO read/search/delete of prospects, no campaign
 create/start, no inbox, no stats: everything else happens in the app, and
 outbound "CRM Sync" webhooks are a campaign-level feature, not an API one.
 
-Auth: `Authorization: Bearer wa_live_…` (app → Settings → CRM Sync →
-Generate API key, shown once). Base URL `https://developers.waalaxy.com` —
+Auth: `Authorization: Bearer <key>` (app → Settings → CRM Sync → Generate
+API key, shown once). Real keys are Zuplo `zpka_…` ones — the docs' `wa_live_…`
+format is not what the app issues (observed 2026-08-26). Base URL `https://developers.waalaxy.com` —
 the prose docs say `api.waalaxy.com`, which does NOT resolve (checked
 2026-08-26); the OpenAPI `servers` block and the reference pages use
 `developers.waalaxy.com`. No pagination (lists return everything), no
