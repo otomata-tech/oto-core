@@ -29,8 +29,9 @@ outcome is per item in `result[i].importCode` (`success`,
 `prospect_does_not_match_preconditions`, `unknown_error`). The client
 returns the body untouched; the MCP layer summarises it.
 
-Not live-tested (no key available at build time, 2026-08-26): built from
-the official reference pages + the OpenAPI schema embedded in them.
+Built from the official reference pages + the OpenAPI schema embedded in
+them, then live-checked on 2026-08-26 (real `zpka_…` keys; see the notes
+above on what the live pass established).
 """
 from __future__ import annotations
 
@@ -57,14 +58,17 @@ CUSTOM_VARIABLE_MAX_LEN = 1000
 class WaalaxyClient:
     BASE_URL = "https://developers.waalaxy.com"
 
-    def __init__(self, api_key: str = None):
+    def __init__(self, api_key: Optional[str] = None):
         self.api_key = api_key or require_secret("WAALAXY_API_KEY")
 
     def _headers(self) -> Dict[str, str]:
         return {"Authorization": f"Bearer {self.api_key}", "Accept": "application/json"}
 
+    _HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
     def _request(self, method: str, path: str, *, json: Any = None) -> Any:
-        resp = requests.request(method, f"{self.BASE_URL}{path}", headers=self._headers(), json=json)
+        resp = requests.request(method, f"{self.BASE_URL}{path}", headers=self._headers(),
+                                json=json, timeout=self._HTTP_TIMEOUT)
         raise_for_upstream(resp, service="waalaxy")
         return resp.json() if resp.content else None
 

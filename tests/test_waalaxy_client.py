@@ -1,4 +1,4 @@
-"""Contrat du client Waalaxy (developers.waalaxy.com, Bearer wa_live_…).
+"""Contrat du client Waalaxy (developers.waalaxy.com, Bearer zpka_…).
 
 Mocke `requests.request` : méthode/URL/body des 4 endpoints de l'API
 publique, le header d'auth, les gardes ValueError d'`add_prospects` et le
@@ -38,12 +38,12 @@ def capture(monkeypatch):
 
 
 def _client():
-    return wc.WaalaxyClient(api_key="wa_live_test")
+    return wc.WaalaxyClient(api_key="zpka_test")
 
 
 def test_auth_header_is_bearer(capture):
     _client().test_connection()
-    assert capture["kwargs"]["headers"]["Authorization"] == "Bearer wa_live_test"
+    assert capture["kwargs"]["headers"]["Authorization"] == "Bearer zpka_test"
     assert (capture["method"], capture["url"]) == ("GET", f"{BASE}/integrations/test")
 
 
