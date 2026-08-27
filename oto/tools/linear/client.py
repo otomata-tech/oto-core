@@ -218,23 +218,52 @@ class LinearClient:
         """
         return self._execute(query, {"id": issue_id})["issue"]
 
+    # `PaginationOrderBy` (SDL @linear/sdk 92.0.0) : deux valeurs, pas plus.
+    ORDER_BY = ("createdAt", "updatedAt")
+
     def list_issues(self, *, team_id: Optional[str] = None,
                      project_id: Optional[str] = None,
                      cycle_id: Optional[str] = None,
                      assignee_id: Optional[str] = None,
                      state_id: Optional[str] = None,
+                     updated_after: Optional[str] = None,
+                     updated_before: Optional[str] = None,
+                     created_after: Optional[str] = None,
+                     created_before: Optional[str] = None,
+                     order_by: Optional[str] = None,
                      first: int = 50, after: Optional[str] = None,
                      fields: Optional[str] = None) -> Any:
-        """`issues(filter:, first:, after:)` — list/filter issues. Returns
-        the raw `{nodes, pageInfo{hasNextPage,endCursor}}` shape; pass the
-        previous call's `endCursor` as `after` to page further.
+        """`issues(filter:, orderBy:, first:, after:)` — list/filter issues.
+        Returns the raw `{nodes, pageInfo{hasNextPage,endCursor}}` shape; pass
+        the previous call's `endCursor` as `after` to page further.
+
+        **Fenêtre de date, côté SERVEUR** (signal #561 : sans elle, tout run qui
+        lit un jour donné devait rapatrier puis jeter). `updated_after` /
+        `updated_before` / `created_after` / `created_before` deviennent des
+        bornes `gte`/`lte` du `DateComparator` que `IssueFilter.updatedAt` et
+        `IssueFilter.createdAt` portent déjà dans le schéma. Horodatages ISO
+        8601 UTC (scalaire `DateTimeOrDuration`). Les deux bornes d'un même
+        champ tiennent dans UN seul comparateur — deux clauses `updatedAt:`
+        séparées seraient un objet d'entrée invalide.
+
+        **Ordre** (signal #568 : « le tri n'est documenté nulle part »). Linear
+        ordonne ses connexions par `createdAt` par défaut, décroissant — relevé
+        le 24/08/2026 contre un workspace réel : la liste revient par identifiant
+        décroissant, et une issue créée le 26 juillet mais modifiée le 21 août
+        se trouve loin dans la pagination. Une lecture de deltas passe donc par
+        `order_by="updatedAt"`, et mieux encore par les bornes ci-dessus.
 
         ⚠️ Live-confirmed 2026-08-21: a GraphQL operation must not DECLARE a
         variable it never references in the selection — declaring all 5
         filter variables unconditionally (as an earlier draft did) fails
         with `GRAPHQL_VALIDATION_FAILED: Variable "$x" is never used` the
         moment any ONE filter is omitted. Variable declarations are built
-        alongside the filter clause below, in lockstep."""
+        alongside the filter clause below, in lockstep — les bornes de date et
+        `orderBy` suivent la même discipline."""
+        if order_by is not None and order_by not in self.ORDER_BY:
+            raise ValueError(
+                f"order_by doit valoir {' ou '.join(self.ORDER_BY)} "
+                f"(enum PaginationOrderBy de Linear) ; reçu {order_by!r}")
         filters = [("teamId", "ID", "team", team_id),
                    ("projectId", "ID", "project", project_id),
                    ("cycleId", "ID", "cycle", cycle_id),
@@ -249,10 +278,32 @@ class LinearClient:
             var_decls.append(f"${var_name}: {gql_type}")
             filter_parts.append(f"{filter_key}: {{ id: {{ eq: ${var_name} }} }}")
             variables[var_name] = value
+        # Une seule clause par champ de date : `gte` et `lte` sont deux clés du
+        # MÊME DateComparator, pas deux filtres.
+        for filter_key, bounds in (
+            ("updatedAt", (("gte", "updatedAfter", updated_after),
+                           ("lte", "updatedBefore", updated_before))),
+            ("createdAt", (("gte", "createdAfter", created_after),
+                           ("lte", "createdBefore", created_before))),
+        ):
+            comparators = []
+            for cmp_key, var_name, value in bounds:
+                if value is None:
+                    continue
+                var_decls.append(f"${var_name}: DateTimeOrDuration")
+                comparators.append(f"{cmp_key}: ${var_name}")
+                variables[var_name] = value
+            if comparators:
+                filter_parts.append(f"{filter_key}: {{ {', '.join(comparators)} }}")
         filter_clause = f"filter: {{ {', '.join(filter_parts)} }}" if filter_parts else ""
+        order_clause = ""
+        if order_by is not None:
+            var_decls.append("$orderBy: PaginationOrderBy")
+            variables["orderBy"] = order_by
+            order_clause = "orderBy: $orderBy, "
         query = f"""
             query Issues({', '.join(var_decls)}) {{
-              issues({filter_clause} first: $first, after: $after) {{
+              issues({filter_clause} {order_clause}first: $first, after: $after) {{
                 nodes {{ {fields or self._ISSUE_FIELDS} }}
                 pageInfo {{ hasNextPage endCursor }}
               }}
