@@ -387,9 +387,10 @@ def test_list_upcoming_interactions(c, calls):
 
 
 def test_interaction_listing_sends_no_limit(c, calls):
-    """`/interactions/past|upcoming` ne déclarent QUE `cursor` et `entity.id` :
-    le `limit=100` que `_paginate` pose partout ailleurs y serait un param
-    inconnu (422 Folk)."""
+    """`/interactions/past|upcoming` ne déclarent QUE `cursor` et `entity.id`.
+    Live 2026-08-27 : un `limit` y est silencieusement IGNORÉ (page fixe de
+    30), pas rejeté — on ne l'envoie donc pas plutôt que de promettre une
+    taille de page qu'on ne contrôle pas."""
     c.list_past_interactions("per_A")
     assert "limit" not in calls[-1]["params"]
 
@@ -414,12 +415,18 @@ def test_get_interaction_quotes_imported_id(c, calls):
     assert calls[-1]["url"] == f"{BASE}/interactions/gmail%2Fthread%2B1%202"
 
 
-def test_update_interaction(c, calls):
-    c.update_interaction("lit_1", title="Café", activityType="coffee")
+def test_update_interaction_always_carries_its_entity(c, calls):
+    """La spec OpenAPI liste `entity` dans le corps du PATCH sans le marquer
+    requis — ça se lit « optionnel, omets-le pour garder l'entité actuelle ».
+    Live 2026-08-27 : sans lui, Folk répond 422 `path: ['entity'], Required`.
+    Le PATCH est scopé comme le get et le delete, par le corps au lieu de la
+    query."""
+    c.update_interaction("lit_1", "per_A", title="Café", activityType="coffee")
     assert calls[-1]["method"] == "PATCH"
     assert calls[-1]["url"] == f"{BASE}/interactions/lit_1"
-    assert calls[-1]["json"] == {"title": "Café", "activityType": "coffee"}
-    assert "params" not in calls[-1]  # le PATCH ne prend PAS entity.id
+    assert calls[-1]["json"] == {"entity": {"id": "per_A"}, "title": "Café",
+                                 "activityType": "coffee"}
+    assert "params" not in calls[-1]  # scopé par le corps, pas par la query
 
 
 def test_delete_interaction_requires_entity_in_query(c, calls):
@@ -571,3 +578,48 @@ def test_task_filter_rejects_illegal_operator():
 def test_task_filter_demands_an_operator_when_ambiguous():
     with pytest.raises(ValueError, match="préciser l'opérateur"):
         folk_client.task_filter_params({"createdAt": "2026-01-01"})
+
+
+def test_create_interaction_always_sends_a_datetime(c, calls):
+    """`dateTime` est REQUIS par Folk (422 `path: ['dateTime'], Required`) alors
+    que ce client le donnait pour facultatif : tout appel qui l'omettait
+    échouait en 422 opaque. Vérifié en live le 2026-08-27. Défaut = maintenant,
+    ce qui ne peut casser aucun appel qui marchait — ceux-là passaient déjà une
+    date."""
+    c.create_interaction(entity_id="per_A", type="coffee", title="Café")
+    stamp = calls[-1]["json"]["dateTime"]
+    assert stamp.endswith("Z") and len(stamp) == len("2026-08-27T09:15:07.746Z")
+    c.create_interaction(entity_id="per_A", type="coffee", title="Café",
+                         date_time="2026-08-20T09:00:00.000Z")
+    assert calls[-1]["json"]["dateTime"] == "2026-08-20T09:00:00.000Z"
+
+
+def test_paginate_stops_at_max_items(c, monkeypatch):
+    """Sans borne, `/interactions/past` sur un contact actif tire des centaines
+    d'interactions par pages de 30 (mesuré en live : >360 sans être au bout).
+    Tout tirer pour n'en montrer que dix n'est pas une troncature, c'est une
+    attente — `max_items` coupe les allers-retours, pas seulement la liste."""
+    pages = []
+
+    def fake_request(method, endpoint, params=None):
+        pages.append(params.get("cursor"))
+        return {"data": {"items": [{"id": f"i{len(pages)}-{k}"} for k in range(30)],
+                         "pagination": {"nextLink": "https://x?cursor=c%d" % len(pages)}}}
+
+    monkeypatch.setattr(c, "_request", fake_request)
+    out = c._paginate("interactions/past", {}, limit=None, max_items=10)
+    assert len(out) == 10
+    assert len(pages) == 1  # UNE page suffisait, on n'a pas déroulé la suite
+
+
+def test_paginate_without_max_items_still_drains(c, monkeypatch):
+    calls = {"n": 0}
+
+    def fake_request(method, endpoint, params=None):
+        calls["n"] += 1
+        last = calls["n"] == 3
+        return {"data": {"items": [{"id": calls["n"]}],
+                         "pagination": {} if last else {"nextLink": "https://x?cursor=c"}}}
+
+    monkeypatch.setattr(c, "_request", fake_request)
+    assert len(c._paginate("people", {})) == 3

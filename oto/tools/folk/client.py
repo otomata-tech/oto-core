@@ -103,7 +103,8 @@ def task_filter_params(filters: Dict[str, Any]) -> Dict[str, Any]:
 
     Les listes (`in`/`not_in`) sont laissées telles quelles : `requests` les
     sérialise en param RÉPÉTÉ (`filter[entity][in]=a&filter[entity][in]=b`).
-    ⚠️ Encodage déduit de la doc, pas vérifié en live sur un lot >1 valeur.
+    Vérifié en live le 2026-08-27 sur deux entités : la clé répétée est bien
+    comprise comme une union (2 ids → 4 tâches, 1 id → 2).
     """
     params: Dict[str, Any] = {}
     for key, val in (filters or {}).items():
@@ -186,15 +187,25 @@ class FolkClient:
         raise Exception("Rate limit exceeded after retries")
 
     def _paginate(self, endpoint: str, params: Dict = None,
-                  limit: Optional[int] = 100) -> List[Dict]:
+                  limit: Optional[int] = 100,
+                  max_items: Optional[int] = None) -> List[Dict]:
         """`limit=None` : ne PAS envoyer de `limit` du tout.
 
-        Folk rejette les query params qu'un endpoint ne déclare pas (422
-        `unrecognized_keys`) — et les deux endpoints d'interactions
-        (`/interactions/past`, `/interactions/upcoming`) ne déclarent QUE
-        `cursor` et `entity.id`. Un `limit` posé par défaut y casserait tout
-        appel. La pagination par curseur, elle, marche partout : c'est la
-        taille de page qui n'est pas réglable là-bas."""
+        Les deux endpoints d'interactions (`/interactions/past`,
+        `/interactions/upcoming`) ne déclarent QUE `cursor` et `entity.id`.
+        Vérifié en live le 2026-08-27 : un `limit` y est **silencieusement
+        ignoré** (page fixe de 30), pas rejeté — donc l'envoyer ne casse rien,
+        mais le promettre serait un mensonge. On ne l'envoie pas, et la
+        pagination par curseur fait le travail (elle, elle marche partout).
+
+        `max_items` : ARRÊTER dès qu'on en a assez, au lieu de vider la
+        collection. Indispensable là où la page est petite ET le volume non
+        borné : mesuré en live le 2026-08-27, `/interactions/past` sur un
+        contact actif rendait plus de 360 interactions sans être au bout, par
+        pages de 30 — soit des dizaines d'allers-retours et plusieurs minutes
+        pour répondre à « qu'est-ce qu'on s'est dit ». Tout tirer pour n'en
+        afficher que dix n'est pas une troncature, c'est une attente.
+        """
         params = dict(params or {})
         if limit is not None:
             params.setdefault("limit", limit)
@@ -203,6 +214,8 @@ class FolkClient:
             data = self._request("GET", endpoint, params=params)
             items = data.get("data", {}).get("items", [])
             all_items.extend(items)
+            if max_items is not None and len(all_items) >= max_items:
+                return all_items[:max_items]
             next_link = data.get("data", {}).get("pagination", {}).get("nextLink")
             if not next_link:
                 break
@@ -427,8 +440,16 @@ class FolkClient:
         }
         if content:
             body["content"] = content
-        if date_time:
-            body["dateTime"] = date_time
+        # `dateTime` est REQUIS par Folk (422 `path: ['dateTime'], Required`),
+        # alors que ce client — et la doc du tool — le donnaient pour
+        # facultatif : tout appel qui l'omettait échouait en 422 opaque.
+        # Vérifié en live le 2026-08-27. Défaut = maintenant : « logue cet
+        # appel sur ce contact » sans date veut dire à l'instant, et ce défaut
+        # ne peut casser aucun appel qui marchait (ceux-là passaient déjà une
+        # date).
+        body["dateTime"] = date_time or (
+            datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+            .replace("+00:00", "Z"))
         return self._request("POST", "interactions", json=body).get("data", {})
 
     # Les trois endpoints ci-dessous sont en **open beta** chez Folk (la doc
@@ -442,19 +463,24 @@ class FolkClient:
     # laquelle elle est rattachée (il n'y a pas de « lister tout le
     # workspace »). Seul le PATCH s'en passe.
 
-    def list_past_interactions(self, entity_id: str) -> List[Dict]:
-        return self._paginate("interactions/past",
-                              {"entity.id": entity_id}, limit=None)
+    def list_past_interactions(self, entity_id: str,
+                               max_items: Optional[int] = None) -> List[Dict]:
+        return self._paginate("interactions/past", {"entity.id": entity_id},
+                              limit=None, max_items=max_items)
 
-    def list_upcoming_interactions(self, entity_id: str) -> List[Dict]:
-        return self._paginate("interactions/upcoming",
-                              {"entity.id": entity_id}, limit=None)
+    def list_upcoming_interactions(self, entity_id: str,
+                                   max_items: Optional[int] = None) -> List[Dict]:
+        return self._paginate("interactions/upcoming", {"entity.id": entity_id},
+                              limit=None, max_items=max_items)
 
     # quote() sur l'id : contrairement aux autres ids Folk (opaques, 40 car.),
     # `get` déclare un id de 1 à 512 caractères — les interactions IMPORTÉES
-    # (email, calendrier, WhatsApp) portent un id synthétique venu de la
-    # source, qui peut contenir des caractères à échapper. Les ids d'update/
-    # delete font 40 (interactions loggées seulement) : quote() y est neutre.
+    # portent l'id synthétique de leur source. Vu en live : des ids Gmail de
+    # 60+ caractères contenant `+` et `_`. Folk les accepte échappés OU bruts
+    # (testé les deux) ; on échappe quand même, parce que rien ne garantit
+    # qu'un id de source future ne portera pas un `/` ou un `?`, qui eux
+    # casseraient le chemin. Les ids d'update/delete font 40 (interactions
+    # loggées seulement) : quote() y est neutre.
 
     def get_interaction(self, interaction_id: str, entity_id: str) -> Dict:
         return self._request(
@@ -462,13 +488,25 @@ class FolkClient:
             params={"entity.id": entity_id},
         ).get("data", {})
 
-    def update_interaction(self, interaction_id: str, **fields) -> Dict:
-        # Seules les interactions LOGGÉES sont modifiables — Folk refuse les
-        # importées (email/calendrier/WhatsApp), qui appartiennent à leur
-        # source.
+    def update_interaction(self, interaction_id: str, entity_id: str,
+                           **fields) -> Dict:
+        """⚠️ `entity_id` est OBLIGATOIRE — vérifié en live le 2026-08-27.
+
+        La spec OpenAPI liste `entity` parmi les propriétés du corps du PATCH
+        sans le marquer requis, ce qui se lit comme « optionnel, omets-le pour
+        garder l'entité actuelle » (c'est d'ailleurs ce que dit la description
+        du champ sur `PATCH /tasks`). Faux ici : sans lui, Folk répond 422
+        `path: ['entity'], message: 'Required'`. Le PATCH est donc scopé comme
+        le get et le delete, juste par le corps au lieu de la query.
+
+        Seules les interactions LOGGÉES sont modifiables — Folk refuse les
+        importées (email/calendrier/WhatsApp), qui appartiennent à leur source.
+        """
+        body: Dict[str, Any] = {"entity": {"id": entity_id}}
+        body.update(fields)
         return self._request(
             "PATCH", f"interactions/{quote(interaction_id, safe='')}",
-            json=fields,
+            json=body,
         ).get("data", {})
 
     def delete_interaction(self, interaction_id: str, entity_id: str) -> Dict:
