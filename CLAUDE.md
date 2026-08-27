@@ -25,6 +25,7 @@ Donc : un connecteur = un client ici, plusieurs faces (CLI, MCP). [[meta otomata
 ```
 oto/                      # namespace (PAS d'__init__.py)
 ├── tools/                # 1 dossier/connecteur : <svc>/client.py (+ lib/ pour google)
+│                         # gros connecteur → familles d'appels en <svc>/_api/*.py (cf. Conventions)
 ├── config.py             # get_secret/require_secret (orchestrateur : env → provider → fallback fichier → défaut)
 └── secrets/              # providers de secrets + factory
     ├── __init__.py       # make_provider(name, cfg) — factory + registre
@@ -46,6 +47,7 @@ Ajouter un provider = un module exposant `lookup(name)` + une ligne au registre
 - **Auth d'une FAMILLE de connecteurs = un module partagé**, jamais recopiée par client — ex. `oto/tools/zoho/auth.py` (refresh OAuth + cache, source unique CRM/Desk/Analytics). Tant que les trois dupliquaient ce bloc, un correctif n'en couvrait qu'un tiers (le cache de token #233 n'avait atterri que sur Analytics).
 - ⚠️ **Un secret ne part JAMAIS en `params=`** (query string) : il entre dans l'URL, donc dans le message de toute exception `requests` — remonté à l'agent, journalisé, envoyé en breadcrumb Sentry — et dans les access logs du serveur distant. Toujours **`data=`** (corps, RFC 6749 §2.3.1 pour OAuth), et pas de `raise_for_status()` sur un endpoint token (son message porte l'URL). Fuite vécue #284 ; garde-fou AST dans **oto-backend** (test « no secrets in query string »).
 - **Cache de token = process-wide keyé par credential** (hash des secrets, jamais un secret en clair comme clé) : le serveur construit un client **par appel MCP**, donc un cache porté par l'instance ne sert jamais → un refresh par appel → rate-limit du provider (Zoho : tous les appels en 400 pendant ~5 min).
+- **Fichier de code < 500 lignes — un gros connecteur se découpe SANS bouger son chemin d'import.** Le point d'entrée reste `<svc>/client.py` (ou `<svc>/lib/<svc>_client.py` côté google) : il porte la construction et le transport, et **compose des mixins par famille d'appels** rangés dans `<svc>/_api/*.py` (un module = un domaine de l'API amont). Les constantes, les types d'erreur et le parsing lourd sortent en modules frères (`const.py`, `errors.py`, `feed.py`), et `client.py` les **réexporte** via `__all__` — le backend et oto-cli épinglent oto-core **par tag** : un symbole qui déménage ne casse pas ici, il casse **au bump du pin**, ailleurs, plus tard. Fait le 2026-08-27 sur unipile (1 702 L → 13 modules) et google/slides (1 516 L → 9 modules) ; le contrat est verrouillé par `tests/test_unipile_surface_frozen.py` et `tests/test_slides_surface_frozen.py`, qui figent membres + signatures et refusent tout module ≥ 500 lignes dans ces deux packages.
 
 ## Gotchas
 
