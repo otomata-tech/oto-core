@@ -147,6 +147,13 @@ def _assigned_users_payload(assigned_users: List[Any]) -> List[Dict[str, str]]:
             if not entry:
                 raise ValueError(
                     f"assigned_users : {u!r} n'a ni 'id' ni 'email'.")
+            if len(entry) > 1:
+                # La garde anti-mixte ne jouait qu'ENTRE entrées : un dict
+                # portant LES DEUX clés partait tel quel — le 422 opaque que
+                # ce helper existe pour prévenir.
+                raise ValueError(
+                    f"assigned_users : {u!r} porte 'id' ET 'email' — une "
+                    "entrée en désigne un seul.")
         elif isinstance(u, str):
             entry = {"email": u} if "@" in u else {"id": u}
         else:
@@ -177,7 +184,10 @@ class FolkClient:
         if method.upper() != "DELETE":
             headers["Content-Type"] = "application/json"
         for attempt in range(3):
-            resp = requests.request(method, url, headers=headers, **kwargs)
+            # (connexion, lecture) — convention repo : un host injoignable ne
+            # doit pas bloquer indéfiniment (le transport n'avait AUCUN timeout).
+            resp = requests.request(method, url, headers=headers,
+                                    timeout=(10, 60), **kwargs)
             if resp.status_code == 429:
                 wait = int(resp.headers.get("Retry-After", 2))
                 time.sleep(wait)

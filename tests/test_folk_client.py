@@ -623,3 +623,29 @@ def test_paginate_without_max_items_still_drains(c, monkeypatch):
 
     monkeypatch.setattr(c, "_request", fake_request)
     assert len(c._paginate("people", {})) == 3
+
+
+def test_assigned_users_entry_with_both_id_and_email_is_refused():
+    """La garde anti-mixte ne jouait qu'ENTRE entrées : un dict portant les
+    DEUX clés partait tel quel vers Folk — le 422 opaque que le helper existe
+    pour prévenir (relevé en revue de #61)."""
+    with pytest.raises(ValueError, match="un seul"):
+        folk_client._assigned_users_payload([{"id": "usr_1", "email": "a@b.co"}])
+
+
+def test_request_sends_connect_read_timeout(c, monkeypatch):
+    """Le transport folk n'avait AUCUN timeout : un host injoignable tenait la
+    mono-loop du backend indéfiniment. Convention repo = (connexion, lecture)."""
+    seen = {}
+
+    def fake(method, url, headers=None, timeout=None, **kw):
+        seen["timeout"] = timeout
+
+        class R:
+            status_code, content = 200, b""
+            headers = {}
+        return R()
+
+    monkeypatch.setattr(folk_client.requests, "request", fake)
+    c._request("GET", "people")
+    assert seen["timeout"] == (10, 60)
