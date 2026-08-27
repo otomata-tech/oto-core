@@ -21,7 +21,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-google = ["google-auth>=2.0.0", "google-auth-oauthlib>=1.0.0", "google-api-python-client>=2.0.0", "gkeepapi>=0.16.0", "markdown>=3.8.1"]  # markdown : CVE-2025-69534
+google = ["google-auth>=2.0.0", "google-auth-oauthlib>=1.0.0", "google-api-python-client>=2.0.0", "markdown>=3.8.1"]  # markdown : CVE-2025-69534
 browser = ["o-browser"]
 vivatech = ["o-browser-vivatech"]
 anthropic = ["anthropic>=0.40.0"]
