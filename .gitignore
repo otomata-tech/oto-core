@@ -26,3 +26,6 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# lock local d'uv (le repo est setuptools/pip, uv ne sert qu'au venv de dev)
+uv.lock
