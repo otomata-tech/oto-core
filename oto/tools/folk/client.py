@@ -1,6 +1,7 @@
 """Folk CRM API Client — https://developer.folk.app/api-reference"""
 
 import time
+from datetime import datetime, timezone
 from typing import Optional, Dict, Any, List
 from urllib.parse import urlparse, parse_qs, quote
 
@@ -60,6 +61,106 @@ def filter_params(filters: Dict[str, Any]) -> Dict[str, Any]:
     return params
 
 
+# Filtres de `GET /v1/tasks` — champ → opérateurs LÉGAUX (doc
+# developer.folk.app/api-reference/filtering §Filterable fields for tasks,
+# 2026-08-27). Deux raisons de ne PAS réutiliser `filter_params` ici :
+#
+# 1. l'opérateur par défaut de `filter_params` est `like`, qui n'existe sur
+#    AUCUN champ de tâche — `{"dueAt": "2026-08-27"}` partirait en
+#    `filter[dueAt][like]` (422, ou pire : silencieusement ignoré) ;
+# 2. `entity` est un champ de RELATION mais s'écrit À PLAT
+#    (`filter[entity][in]=per_…`), là où `groups`/`companies` sur les
+#    personnes veulent `filter[groups][in][id]=grp_…`. L'ajouter à
+#    RELATION_FIELDS produirait donc le mauvais encodage.
+#
+# Allow-list codée en dur, comme `_CREATE_FIELDS` côté backend : un champ ou
+# un opérateur inconnu doit lever en NOMMANT ce qui existe, jamais partir tel
+# quel vers Folk.
+TASK_FILTER_OPS: Dict[str, frozenset] = {
+    "dueAt": frozenset({"eq", "not_eq", "gt", "lt"}),
+    "createdAt": frozenset({"gt", "lt"}),
+    "assigneeUserId": frozenset({"in", "not_in"}),
+    "entity": frozenset({"in", "not_in"}),
+    "completedAt": frozenset({"empty", "not_empty", "gt", "lt"}),
+}
+
+# Opérateur implicite quand l'appelant passe une valeur nue plutôt qu'un
+# `{op: valeur}`. Défini seulement là où il n'y a pas d'ambiguïté : une date
+# `createdAt`/`completedAt` nue ne veut rien dire (avant ? après ?), on exige
+# l'opérateur plutôt que d'en inventer un.
+TASK_FILTER_DEFAULT_OP = {"dueAt": "eq", "assigneeUserId": "in", "entity": "in"}
+
+# `empty`/`not_empty` sont des prédicats sans opérande : Folk les veut avec une
+# valeur VIDE (`filter[completedAt][empty]=`). Quoi que passe l'appelant (True,
+# None, "yes"…), on normalise — sinon `filter[completedAt][empty]=True` teste
+# une égalité qui n'a pas de sens.
+_TASK_VALUELESS_OPS = frozenset({"empty", "not_empty"})
+
+
+def task_filter_params(filters: Dict[str, Any]) -> Dict[str, Any]:
+    """Traduit `{champ: valeur}` / `{champ: {op: valeur}}` en `filter[...]` de
+    `GET /v1/tasks`, en refusant tout champ ou opérateur hors doc.
+
+    Les listes (`in`/`not_in`) sont laissées telles quelles : `requests` les
+    sérialise en param RÉPÉTÉ (`filter[entity][in]=a&filter[entity][in]=b`).
+    ⚠️ Encodage déduit de la doc, pas vérifié en live sur un lot >1 valeur.
+    """
+    params: Dict[str, Any] = {}
+    for key, val in (filters or {}).items():
+        allowed = TASK_FILTER_OPS.get(key)
+        if allowed is None:
+            raise ValueError(
+                f"filtre de tâche inconnu : {key!r}. Champs filtrables : "
+                f"{sorted(TASK_FILTER_OPS)}.")
+        if isinstance(val, dict):
+            pairs = list(val.items())
+        else:
+            op = TASK_FILTER_DEFAULT_OP.get(key)
+            if op is None:
+                raise ValueError(
+                    f"filtre {key!r} : préciser l'opérateur, p.ex. "
+                    f"{{{key!r}: {{'gt': '2026-01-01'}}}} — opérateurs "
+                    f"acceptés : {sorted(allowed)}.")
+            pairs = [(op, val)]
+        for op, v in pairs:
+            if op not in allowed:
+                raise ValueError(
+                    f"opérateur {op!r} non supporté sur le filtre {key!r} — "
+                    f"acceptés : {sorted(allowed)}.")
+            params[f"filter[{key}][{op}]"] = "" if op in _TASK_VALUELESS_OPS else v
+    return params
+
+
+def _assigned_users_payload(assigned_users: List[Any]) -> List[Dict[str, str]]:
+    """Normalise `assigned_users` en `[{"id": …}]` OU `[{"email": …}]`.
+
+    Folk accepte les deux formes mais **pas les deux mélangées** dans le même
+    appel (doc create/update a task) : un lot mixte part en 422 opaque. On le
+    refuse ici, en nommant les deux moitiés — l'appelant sait alors quoi
+    couper, ce qu'un 422 de Folk ne lui dit pas.
+    """
+    ids, emails, out = [], [], []
+    for u in assigned_users:
+        if isinstance(u, dict):
+            entry = {k: v for k, v in u.items() if k in ("id", "email")}
+            if not entry:
+                raise ValueError(
+                    f"assigned_users : {u!r} n'a ni 'id' ni 'email'.")
+        elif isinstance(u, str):
+            entry = {"email": u} if "@" in u else {"id": u}
+        else:
+            raise ValueError(
+                f"assigned_users : {u!r} doit être un id, un email, ou un "
+                "dict {'id'|'email'}.")
+        (emails if "email" in entry else ids).append(next(iter(entry.values())))
+        out.append(entry)
+    if ids and emails:
+        raise ValueError(
+            "assigned_users : Folk accepte des ids OU des emails, pas les "
+            f"deux dans le même appel — ids={ids}, emails={emails}.")
+    return out
+
+
 class FolkClient:
     BASE_URL = "https://api.folk.app/v1"
 
@@ -84,9 +185,19 @@ class FolkClient:
             return self.field_filter.apply(resp.json()) if resp.content else {}
         raise Exception("Rate limit exceeded after retries")
 
-    def _paginate(self, endpoint: str, params: Dict = None) -> List[Dict]:
-        params = params or {}
-        params.setdefault("limit", 100)
+    def _paginate(self, endpoint: str, params: Dict = None,
+                  limit: Optional[int] = 100) -> List[Dict]:
+        """`limit=None` : ne PAS envoyer de `limit` du tout.
+
+        Folk rejette les query params qu'un endpoint ne déclare pas (422
+        `unrecognized_keys`) — et les deux endpoints d'interactions
+        (`/interactions/past`, `/interactions/upcoming`) ne déclarent QUE
+        `cursor` et `entity.id`. Un `limit` posé par défaut y casserait tout
+        appel. La pagination par curseur, elle, marche partout : c'est la
+        taille de page qui n'est pas réglable là-bas."""
+        params = dict(params or {})
+        if limit is not None:
+            params.setdefault("limit", limit)
         all_items = []
         while True:
             data = self._request("GET", endpoint, params=params)
@@ -320,7 +431,144 @@ class FolkClient:
             body["dateTime"] = date_time
         return self._request("POST", "interactions", json=body).get("data", {})
 
-    # --- Reminders ---
+    # Les trois endpoints ci-dessous sont en **open beta** chez Folk (la doc
+    # prévient que la surface peut bouger). Ils existaient déjà quand ce
+    # client ne portait que `create_interaction` : le connecteur affirmait
+    # alors qu'on ne pouvait pas RELIRE une interaction, ce qui était vrai de
+    # lui, pas de Folk.
+    #
+    # `entity.id` est OBLIGATOIRE en query sur past/upcoming/get/delete : une
+    # interaction n'est adressable que via la personne ou la société à
+    # laquelle elle est rattachée (il n'y a pas de « lister tout le
+    # workspace »). Seul le PATCH s'en passe.
+
+    def list_past_interactions(self, entity_id: str) -> List[Dict]:
+        return self._paginate("interactions/past",
+                              {"entity.id": entity_id}, limit=None)
+
+    def list_upcoming_interactions(self, entity_id: str) -> List[Dict]:
+        return self._paginate("interactions/upcoming",
+                              {"entity.id": entity_id}, limit=None)
+
+    # quote() sur l'id : contrairement aux autres ids Folk (opaques, 40 car.),
+    # `get` déclare un id de 1 à 512 caractères — les interactions IMPORTÉES
+    # (email, calendrier, WhatsApp) portent un id synthétique venu de la
+    # source, qui peut contenir des caractères à échapper. Les ids d'update/
+    # delete font 40 (interactions loggées seulement) : quote() y est neutre.
+
+    def get_interaction(self, interaction_id: str, entity_id: str) -> Dict:
+        return self._request(
+            "GET", f"interactions/{quote(interaction_id, safe='')}",
+            params={"entity.id": entity_id},
+        ).get("data", {})
+
+    def update_interaction(self, interaction_id: str, **fields) -> Dict:
+        # Seules les interactions LOGGÉES sont modifiables — Folk refuse les
+        # importées (email/calendrier/WhatsApp), qui appartiennent à leur
+        # source.
+        return self._request(
+            "PATCH", f"interactions/{quote(interaction_id, safe='')}",
+            json=fields,
+        ).get("data", {})
+
+    def delete_interaction(self, interaction_id: str, entity_id: str) -> Dict:
+        return self._request(
+            "DELETE", f"interactions/{quote(interaction_id, safe='')}",
+            params={"entity.id": entity_id},
+        )
+
+    # --- Tasks ---
+    # Le successeur officiel des rappels (voir la section Reminders ci-dessous).
+
+    def list_tasks(self, filters: Dict[str, Any] = None,
+                   only_assigned_to_me: Optional[bool] = None,
+                   combinator: Optional[str] = None) -> List[Dict]:
+        """`filters` est un DICT, pas un `**splat` — contrairement à
+        `list_people`. Les clés viennent de l'appelant (un agent) : `**filters`
+        laisserait un filtre nommé `combinator` ou `only_assigned_to_me` se
+        faire manger par le paramètre homonyme, appliqué en SILENCE et jamais
+        soumis à `task_filter_params`. Même famille de collision que
+        `_create_one` côté backend (signal #353) : un champ métier avalé par un
+        paramètre du même nom."""
+        params = task_filter_params(filters)
+        if only_assigned_to_me is not None:
+            # Folk déclare cette query en ENUM de chaînes ("true"/"false"),
+            # pas en booléen : `requests` sérialiserait un bool Python en
+            # "True"/"False" (majuscule), hors enum.
+            params["onlyAssignedToMe"] = "true" if only_assigned_to_me else "false"
+        if combinator:
+            params["combinator"] = combinator
+        return self._paginate("tasks", params)
+
+    def get_task(self, task_id: str) -> Dict:
+        return self._request("GET", f"tasks/{task_id}").get("data", {})
+
+    def create_task(self, entity_id: str, title: str, due_at: str,
+                    due_time: str = None, description: str = None,
+                    recurrence_frequency: str = None,
+                    assigned_users: List[Any] = None,
+                    is_public: bool = None) -> Dict:
+        body: Dict[str, Any] = {
+            "entity": {"id": entity_id},
+            "title": title,
+            "dueAt": due_at,
+        }
+        if due_time:
+            body["dueTime"] = due_time
+        if description:
+            body["description"] = description
+        if recurrence_frequency:
+            body["recurrenceFrequency"] = recurrence_frequency
+        if assigned_users:
+            body["assignedUsers"] = _assigned_users_payload(assigned_users)
+        if is_public is not None:
+            body["isPublic"] = is_public
+        return self._request("POST", "tasks", json=body).get("data", {})
+
+    def update_task(self, task_id: str, **fields) -> Dict:
+        if "assignedUsers" in fields:
+            fields = dict(fields)
+            fields["assignedUsers"] = _assigned_users_payload(
+                fields["assignedUsers"])
+        return self._request("PATCH", f"tasks/{task_id}", json=fields).get("data", {})
+
+    def delete_task(self, task_id: str) -> Dict:
+        return self._request("DELETE", f"tasks/{task_id}")
+
+    # Chemins pris sur l'OpenAPI (`/mark-as-done`, `/mark-as-todo`), PAS sur la
+    # page de migration reminders→tasks, dont l'exemple écrit `/mark-done` —
+    # la spec fait foi, l'exemple est une coquille.
+    #
+    # Une tâche ne se termine JAMAIS toute seule chez Folk : `completedAt` ne
+    # bouge que sur un appel explicite. C'est la différence de fond avec un
+    # rappel, qui se marque « déclenché » sur son propre calendrier.
+
+    def mark_task_done(self, task_id: str, completed_at: str = None) -> Dict:
+        # `completedAt` est REQUIS par l'endpoint (et n'est PAS acceptable dans
+        # un PATCH). Par défaut : maintenant, en ISO 8601 UTC millisecondes —
+        # la forme des exemples Folk.
+        if not completed_at:
+            completed_at = (datetime.now(timezone.utc)
+                            .isoformat(timespec="milliseconds")
+                            .replace("+00:00", "Z"))
+        return self._request(
+            "POST", f"tasks/{task_id}/mark-as-done",
+            json={"completedAt": completed_at},
+        ).get("data", {})
+
+    def mark_task_todo(self, task_id: str) -> Dict:
+        # Pas de corps : rouvrir une tâche remet `completedAt` à null.
+        return self._request("POST", f"tasks/{task_id}/mark-as-todo").get("data", {})
+
+    # --- Reminders (DEPRECATED chez Folk depuis le 2026-08-13) ---
+    # Retrait annoncé pour février 2027 ; le successeur est `tasks` ci-dessus
+    # (mapping des champs : name→title, recurrenceRule→dueAt/dueTime +
+    # recurrenceFrequency, visibility→isPublic). Ces méthodes restent tant que
+    # les endpoints répondent, mais rien de nouveau ne devrait s'y brancher.
+    # ⚠️ Folk ne dit NULLE PART si les rappels déjà posés remontent aussi dans
+    # `list_tasks` (deux vues d'un même stock) ou s'ils vivent à côté. Non
+    # vérifié en live faute de clé — à trancher avant toute migration de
+    # données ; voir la note du connecteur.
 
     def list_reminders(self, entity_id: str = None) -> List[Dict]:
         # Même bug que list_notes : le filtre serveur par entité est ignoré →

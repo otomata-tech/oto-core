@@ -365,3 +365,209 @@ def test_update_group_member(c, calls):
     assert calls[-1]["url"] == f"{BASE}/groups/grp_1/members/usr_1"
     assert calls[-1]["json"] == {"role": "reader"}
     assert "deal.created" not in folk_client.WEBHOOK_EVENT_TYPES  # deals = object.*
+
+
+# --- Interactions : lecture (open beta chez Folk) --------------------------
+# Le connecteur n'a longtemps exposé que la CRÉATION d'interaction, d'où la
+# croyance qu'on ne pouvait pas relire ce qui s'était dit. Folk expose bien
+# past/upcoming/get/patch/delete — ces tests verrouillent leur contrat HTTP.
+
+
+def test_list_past_interactions(c, calls):
+    c.list_past_interactions("per_A")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/interactions/past"
+    assert calls[-1]["params"] == {"entity.id": "per_A"}
+
+
+def test_list_upcoming_interactions(c, calls):
+    c.list_upcoming_interactions("per_A")
+    assert calls[-1]["url"] == f"{BASE}/interactions/upcoming"
+    assert calls[-1]["params"] == {"entity.id": "per_A"}
+
+
+def test_interaction_listing_sends_no_limit(c, calls):
+    """`/interactions/past|upcoming` ne déclarent QUE `cursor` et `entity.id` :
+    le `limit=100` que `_paginate` pose partout ailleurs y serait un param
+    inconnu (422 Folk)."""
+    c.list_past_interactions("per_A")
+    assert "limit" not in calls[-1]["params"]
+
+
+def test_other_listings_still_send_limit(c, calls):
+    """…et l'opt-out ci-dessus ne doit pas déborder sur les autres endpoints."""
+    c.list_people()
+    assert calls[-1]["params"]["limit"] == 100
+
+
+def test_get_interaction_requires_entity_in_query(c, calls):
+    c.get_interaction("lit_1", "per_A")
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/interactions/lit_1"
+    assert calls[-1]["params"] == {"entity.id": "per_A"}
+
+
+def test_get_interaction_quotes_imported_id(c, calls):
+    """Une interaction importée porte l'id synthétique de sa source (jusqu'à
+    512 car.), pas un id Folk opaque de 40 — il doit être échappé."""
+    c.get_interaction("gmail/thread+1 2", "per_A")
+    assert calls[-1]["url"] == f"{BASE}/interactions/gmail%2Fthread%2B1%202"
+
+
+def test_update_interaction(c, calls):
+    c.update_interaction("lit_1", title="Café", activityType="coffee")
+    assert calls[-1]["method"] == "PATCH"
+    assert calls[-1]["url"] == f"{BASE}/interactions/lit_1"
+    assert calls[-1]["json"] == {"title": "Café", "activityType": "coffee"}
+    assert "params" not in calls[-1]  # le PATCH ne prend PAS entity.id
+
+
+def test_delete_interaction_requires_entity_in_query(c, calls):
+    c.delete_interaction("lit_1", "per_A")
+    assert calls[-1]["method"] == "DELETE"
+    assert calls[-1]["url"] == f"{BASE}/interactions/lit_1"
+    assert calls[-1]["params"] == {"entity.id": "per_A"}
+
+
+# --- Tasks (successeur des rappels) ----------------------------------------
+
+
+def test_list_tasks(c, calls):
+    c.list_tasks({"entity": "per_A"})
+    assert calls[-1]["method"] == "GET"
+    assert calls[-1]["url"] == f"{BASE}/tasks"
+    assert calls[-1]["params"]["filter[entity][in]"] == "per_A"
+    assert calls[-1]["params"]["limit"] == 100  # /tasks, lui, déclare `limit`
+
+
+def test_list_tasks_filters_is_a_dict_not_a_splat(c, calls):
+    """Un filtre nommé comme un paramètre de la méthode doit être VALIDÉ, pas
+    avalé : `**filters` aurait posé `combinator=or` en silence."""
+    with pytest.raises(ValueError, match="filtre de tâche inconnu"):
+        c.list_tasks({"combinator": "or"})
+
+
+def test_list_tasks_only_assigned_to_me_is_a_string_enum(c, calls):
+    """Folk déclare `onlyAssignedToMe` en enum "true"/"false" : un bool Python
+    partirait en "True" (majuscule), hors enum."""
+    c.list_tasks(only_assigned_to_me=True)
+    assert calls[-1]["params"]["onlyAssignedToMe"] == "true"
+    c.list_tasks(only_assigned_to_me=False)
+    assert calls[-1]["params"]["onlyAssignedToMe"] == "false"
+
+
+def test_get_task(c, calls):
+    c.get_task("tsk_1")
+    assert calls[-1]["url"] == f"{BASE}/tasks/tsk_1"
+
+
+def test_create_task(c, calls):
+    c.create_task(entity_id="per_A", title="Relancer", due_at="2026-09-01",
+                  due_time="09:00", description="**Avant** d'appeler",
+                  recurrence_frequency="weekly", is_public=False)
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/tasks"
+    assert calls[-1]["json"] == {
+        "entity": {"id": "per_A"}, "title": "Relancer", "dueAt": "2026-09-01",
+        "dueTime": "09:00", "description": "**Avant** d'appeler",
+        "recurrenceFrequency": "weekly", "isPublic": False,
+    }
+
+
+def test_create_task_is_public_false_is_not_dropped(c, calls):
+    """`isPublic=False` (tâche privée) est une valeur SIGNIFIANTE : un test de
+    vérité l'aurait avalée comme un champ absent."""
+    c.create_task(entity_id="per_A", title="T", due_at="2026-09-01",
+                  is_public=False)
+    assert calls[-1]["json"]["isPublic"] is False
+
+
+def test_create_task_assigned_users_ids_and_emails(c, calls):
+    c.create_task(entity_id="per_A", title="T", due_at="2026-09-01",
+                  assigned_users=["usr_1", {"id": "usr_2"}])
+    assert calls[-1]["json"]["assignedUsers"] == [{"id": "usr_1"}, {"id": "usr_2"}]
+    c.create_task(entity_id="per_A", title="T", due_at="2026-09-01",
+                  assigned_users=["a@b.co"])
+    assert calls[-1]["json"]["assignedUsers"] == [{"email": "a@b.co"}]
+
+
+def test_create_task_rejects_mixed_ids_and_emails(c, calls):
+    with pytest.raises(ValueError, match="ids OU des emails"):
+        c.create_task(entity_id="per_A", title="T", due_at="2026-09-01",
+                      assigned_users=["usr_1", "a@b.co"])
+
+
+def test_update_task(c, calls):
+    c.update_task("tsk_1", title="Relancer (bis)", dueAt="2026-09-08")
+    assert calls[-1]["method"] == "PATCH"
+    assert calls[-1]["url"] == f"{BASE}/tasks/tsk_1"
+    assert calls[-1]["json"] == {"title": "Relancer (bis)", "dueAt": "2026-09-08"}
+
+
+def test_update_task_normalises_assigned_users(c, calls):
+    c.update_task("tsk_1", assignedUsers=["a@b.co"])
+    assert calls[-1]["json"]["assignedUsers"] == [{"email": "a@b.co"}]
+
+
+def test_delete_task(c, calls):
+    c.delete_task("tsk_1")
+    assert calls[-1]["method"] == "DELETE"
+    assert calls[-1]["url"] == f"{BASE}/tasks/tsk_1"
+
+
+def test_mark_task_done_path_and_default_timestamp(c, calls):
+    """Chemin pris sur l'OpenAPI (`mark-as-done`), PAS sur l'exemple de la page
+    de migration qui écrit `mark-done`. `completedAt` est REQUIS."""
+    c.mark_task_done("tsk_1")
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/tasks/tsk_1/mark-as-done"
+    stamp = calls[-1]["json"]["completedAt"]
+    assert stamp.endswith("Z") and "+00:00" not in stamp
+    assert len(stamp) == len("2026-08-27T07:46:40.610Z")
+
+
+def test_mark_task_done_explicit_timestamp(c, calls):
+    c.mark_task_done("tsk_1", completed_at="2026-08-26T10:00:00.000Z")
+    assert calls[-1]["json"] == {"completedAt": "2026-08-26T10:00:00.000Z"}
+
+
+def test_mark_task_todo_has_no_body(c, calls):
+    c.mark_task_todo("tsk_1")
+    assert calls[-1]["method"] == "POST"
+    assert calls[-1]["url"] == f"{BASE}/tasks/tsk_1/mark-as-todo"
+    assert "json" not in calls[-1]
+
+
+# --- Filtres de tâches : allow-list, pas `filter_params` -------------------
+
+
+def test_task_entity_filter_is_flat_not_nested_id():
+    """Piège : `entity` est une relation mais s'écrit À PLAT sur /tasks, là où
+    `groups` sur /people veut `[in][id]`. Réutiliser `filter_params` aurait
+    produit `filter[entity][in][id]`."""
+    assert folk_client.task_filter_params({"entity": "per_A"}) == {
+        "filter[entity][in]": "per_A"}
+    assert folk_client.filter_params({"groups": "grp_42"}) == {
+        "filter[groups][in][id]": "grp_42"}
+
+
+def test_task_valueless_operators_send_empty_string():
+    assert folk_client.task_filter_params({"completedAt": {"empty": True}}) == {
+        "filter[completedAt][empty]": ""}
+
+
+def test_task_filter_rejects_unknown_field():
+    with pytest.raises(ValueError, match="filtre de tâche inconnu"):
+        folk_client.task_filter_params({"title": "Relancer"})
+
+
+def test_task_filter_rejects_illegal_operator():
+    """`like` n'existe sur AUCUN champ de tâche — c'est pourtant le défaut de
+    `filter_params`, d'où le refus de le réutiliser ici."""
+    with pytest.raises(ValueError, match="non supporté"):
+        folk_client.task_filter_params({"dueAt": {"like": "2026"}})
+
+
+def test_task_filter_demands_an_operator_when_ambiguous():
+    with pytest.raises(ValueError, match="préciser l'opérateur"):
+        folk_client.task_filter_params({"createdAt": "2026-01-01"})
