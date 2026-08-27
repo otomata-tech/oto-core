@@ -141,13 +141,48 @@ class AttioNotes:
         }
         return self.client._request("POST", "notes", json=data)
 
-    def list(self, parent_object: str = None, parent_record_id: str = None) -> List[Dict[str, Any]]:
-        """List notes."""
+    # Plafond du `limit` d'Attio sur /v2/notes : 50 accepté, 51 → HTTP 400
+    # « Query params validation error » (sans autre indication). Relevé le
+    # 27/08/2026 par bisection contre l'API réelle, conforme au doc.
+    MAX_LIMIT = 50
+
+    def list(self, parent_object: str = None, parent_record_id: str = None,
+             limit: int = None, offset: int = None) -> List[Dict[str, Any]]:
+        """Liste les notes. `GET /v2/notes` ne sait faire que DEUX choses :
+        paginer (`limit` 1-50, défaut **10** ; `offset`) et se restreindre à un
+        record parent (`parent_object` ET `parent_record_id` ensemble — l'un
+        sans l'autre est refusé en 400).
+
+        ⚠️ **Ni tri ni filtre de date, et l'API ne le dit pas** : elle AVALE les
+        paramètres qu'elle ne connaît pas en rendant 200. Vérifié le 27/08/2026
+        par différentiel — `sort=champ_qui_nexiste_pas:desc`, `created_at[gte]`,
+        `created_after` et même `zzz_inconnu=x` reviennent tous 200 inchangés,
+        là où `/tasks` refuse un `sort` invalide en 400. C'est pourquoi on
+        n'expose PAS de borne de date ici : elle ne bornerait rien.
+
+        Conséquence pour l'appelant, et raison d'être des signaux #586/#597 :
+        les notes sortent des plus ANCIENNES aux plus récentes, donc celles du
+        jour sont en FIN de collection. Sans `limit`/`offset`, on ne voyait que
+        les dix plus vieilles du workspace. Pour atteindre les récentes :
+        avancer `offset` par pages de 50 jusqu'à une page plus courte que
+        `limit` (fin de collection) — il n'existe pas de compte total.
+        Alternative moins coûteuse quand le record est connu : scoper sur
+        `parent_object`+`parent_record_id`.
+        """
+        if limit is not None and not 1 <= limit <= self.MAX_LIMIT:
+            raise ValueError(
+                f"limit doit être entre 1 et {self.MAX_LIMIT} (plafond d'Attio sur /notes) ; reçu {limit}")
         params = {}
         if parent_object:
             params["parent_object"] = parent_object
         if parent_record_id:
             params["parent_record_id"] = parent_record_id
+        # Aucune borne fournie ⟹ aucun paramètre inventé : le défaut d'Attio
+        # (10, les plus anciennes) s'applique et la docstring l'annonce.
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
 
         return self.client._request("GET", "notes", params=params)
 
@@ -216,11 +251,42 @@ class AttioTasks:
 
         return self.client._request("POST", "tasks", json={"data": task_data})
 
-    def list(self, completed: bool = None) -> List[Dict[str, Any]]:
-        """List tasks."""
+    # `GET /v2/tasks` : limit accepté jusqu'à 1000, 1001 → HTTP 400 (bisection
+    # du 27/08/2026) ; défaut 500. `sort` est un VRAI paramètre, contrairement
+    # à /notes : une valeur hors de cet ensemble est refusée en 400.
+    MAX_LIMIT = 1000
+    SORTS = ("created_at:asc", "created_at:desc", "completed_at:asc", "completed_at:desc")
+
+    def list(self, completed: bool = None, limit: int = None, offset: int = None,
+             sort: str = None) -> List[Dict[str, Any]]:
+        """Liste les tâches. Pagination `limit` (1-1000, défaut 500) + `offset`,
+        tri `sort` parmi `created_at:asc|desc` et `completed_at:asc|desc`
+        (défaut `created_at:asc` — les plus ANCIENNES d'abord, d'où la page
+        tronquée « qui s'arrête en juillet » du signal #586).
+
+        ⚠️ Le filtre de complétion s'appelle `is_completed` chez Attio, PAS
+        `completed`. Ce client envoyait `completed` : un nom inconnu, avalé en
+        silence (vérifié le 27/08/2026 par différentiel — `is_completed=PASBOOL`
+        → 400, `completed=PASBOOL` → 200), donc le filtre annoncé au tool ne
+        filtrait rien. Le paramètre Python garde son nom, seul le fil change.
+
+        Pas de filtre de date ici non plus : trier `created_at:desc` et
+        s'arrêter est la seule façon de lire une fenêtre récente.
+        """
+        if limit is not None and not 1 <= limit <= self.MAX_LIMIT:
+            raise ValueError(
+                f"limit doit être entre 1 et {self.MAX_LIMIT} (plafond d'Attio sur /tasks) ; reçu {limit}")
+        if sort is not None and sort not in self.SORTS:
+            raise ValueError(f"sort doit valoir l'un de {', '.join(self.SORTS)} ; reçu {sort!r}")
         params = {}
         if completed is not None:
-            params["completed"] = completed
+            params["is_completed"] = completed
+        if limit is not None:
+            params["limit"] = limit
+        if offset is not None:
+            params["offset"] = offset
+        if sort is not None:
+            params["sort"] = sort
 
         return self.client._request("GET", "tasks", params=params)
 
@@ -478,9 +544,38 @@ class AttioMeetings:
     def __init__(self, client: "AttioClient"):
         self.client = client
 
-    def list(self, limit: int = 50, offset: int = 0) -> Dict[str, Any]:
-        """List meetings."""
-        return self.client._request("GET", "meetings", params={"limit": limit, "offset": offset})
+    # `GET /v2/meetings` : limit 1-200 (201 → 400), défaut 50. Pagination au
+    # CURSEUR uniquement — `offset` n'existe pas dans son contrat et l'API
+    # l'avale (`offset=-1` et `offset=PASUNENTIER` reviennent 200, là où
+    # /notes refuse `offset=-1` en 400). Relevé le 27/08/2026.
+    MAX_LIMIT = 200
+    SORTS = ("start_asc", "start_desc")
+
+    def list(self, limit: int = None, cursor: str = None, sort: str = None,
+             ends_from: str = None, starts_before: str = None) -> Dict[str, Any]:
+        """Liste les réunions. Le seul endpoint du connecteur à porter une VRAIE
+        fenêtre de date : `ends_from` (réunions finissant à partir de, inclus) et
+        `starts_before` (commençant avant, exclu) — horodatages ISO 8601, refusés
+        en 400 s'ils ne parsent pas. Tri `sort` = `start_asc` (défaut) ou
+        `start_desc`. `limit` 1-200, défaut 50.
+
+        ⚠️ **Pagination au curseur, pas à l'offset** — signal #586 : le client
+        envoyait `offset`, qu'Attio ignore (`offset=2000` rendait les deux mêmes
+        réunions de janvier 2023) ; seul `pagination.next_cursor` avance, et il
+        n'était pas acceptable en argument. Repasser ce `next_cursor` en
+        `cursor` pour la page suivante ; `next_cursor` nul = fin de collection.
+        """
+        if limit is not None and not 1 <= limit <= self.MAX_LIMIT:
+            raise ValueError(
+                f"limit doit être entre 1 et {self.MAX_LIMIT} (plafond d'Attio sur /meetings) ; reçu {limit}")
+        if sort is not None and sort not in self.SORTS:
+            raise ValueError(f"sort doit valoir {' ou '.join(self.SORTS)} ; reçu {sort!r}")
+        params = {}
+        for key, value in (("limit", limit), ("cursor", cursor), ("sort", sort),
+                           ("ends_from", ends_from), ("starts_before", starts_before)):
+            if value is not None:
+                params[key] = value
+        return self.client._request("GET", "meetings", params=params)
 
     def get(self, meeting_id: str) -> Dict[str, Any]:
         """Get a single meeting by ID."""
