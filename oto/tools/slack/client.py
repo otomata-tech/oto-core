@@ -42,11 +42,24 @@ _SLACK_ERROR_STATUS = {
 
 class SlackError(RuntimeError):
     """Erreur API Slack (`ok:false`). `status` = équivalent HTTP du code Slack
-    (défaut 400 = rejet client), `error` = le code Slack brut."""
+    (défaut 400 = rejet client), `error` = le code Slack brut.
 
-    def __init__(self, error: Optional[str], status: Optional[int] = None):
+    `needed` / `provided` : sur un `missing_scope`, Slack NOMME lui-même le droit
+    qui manque et ceux qu'il a vus sur le token. Sondé le 2026-08-28 —
+    `conversations.replies` sur un canal privé avec un token sans `groups:history`
+    rend `needed=groups:history, provided=identify,im:history,…`. Les jeter
+    obligeait l'aval à deviner le scope, et un refus qu'on ne sait pas traduire en
+    geste bloque l'appelant (deux orgs immobilisées, oto-backend #510/#532).
+    `needed` peut être une LISTE séparée par virgules = « l'un de ceux-là suffit »
+    (observé : `channels:read,groups:read,mpim:read,im:read`).
+    """
+
+    def __init__(self, error: Optional[str], status: Optional[int] = None,
+                 *, needed: Optional[str] = None, provided: Optional[str] = None):
         self.error = error or "unknown"
         self.status = status if status is not None else _SLACK_ERROR_STATUS.get(self.error, 400)
+        self.needed = needed or None
+        self.provided = provided or None
         super().__init__(f"Slack API error: {self.error}")
 
 
@@ -191,7 +204,8 @@ class SlackClient:
 
         data = response.json()
         if not data.get("ok"):
-            raise SlackError(data.get("error"))
+            raise SlackError(data.get("error"), needed=data.get("needed"),
+                             provided=data.get("provided"))
 
         return data
 
@@ -363,17 +377,26 @@ class SlackClient:
         cursor: Optional[str] = None,
         oldest: Optional[str] = None,
         latest: Optional[str] = None,
+        inclusive: bool = False,
         as_user: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Read recent messages from a channel (or DM/group).
+        Read recent messages from a channel (or DM/group). TOP-LEVEL ONLY —
+        les réponses de fil s'obtiennent par `replies()`.
+
+        Bornes sondées le 2026-08-28 : `oldest`/`latest` sont **exclusives**
+        (mesuré par différentiel : 10 messages sans borne, 4 avec `oldest`), et
+        `inclusive=True` inclut le message posé exactement sur la borne.
+        ⚠️ Un ts invalide rend `invalid_ts_oldest` — donc ne jamais laisser
+        partir un `None` converti en chaîne.
 
         Args:
             channel: Channel ID
             limit: Max messages (capped at 100 by Slack)
             cursor: Pagination cursor from a previous call
-            oldest: Only messages after this ts
-            latest: Only messages before this ts
+            oldest: Only messages after this ts (exclusive)
+            latest: Only messages before this ts (exclusive)
+            inclusive: Include the messages sitting exactly on oldest/latest
             as_user: Token override; None → route by channel id — DMs (`D…`) via
                 the user token, channels (`C…`/`G…`) via the bot token.
 
@@ -389,7 +412,117 @@ class SlackClient:
             params["oldest"] = oldest
         if latest:
             params["latest"] = latest
+        if inclusive:
+            params["inclusive"] = "true"
         return self._request("GET", "conversations.history", as_user=as_user, params=params)
+
+    def replies(
+        self,
+        channel: str,
+        thread_ts: str,
+        limit: int = 50,
+        cursor: Optional[str] = None,
+        oldest: Optional[str] = None,
+        latest: Optional[str] = None,
+        inclusive: bool = False,
+        as_user: Optional[bool] = None,
+    ) -> Dict[str, Any]:
+        """Read the REPLIES of a thread (`conversations.replies`).
+
+        `conversations.history` ne rend que le premier niveau : sur un parent il
+        annonce `reply_count`/`reply_users`/`latest_reply` et **jamais un corps de
+        réponse**. C'est le manque signalé quatre fois en huit jours par trois
+        personnes (oto-backend #567/#576/#584/#592) : une décision ou un désaccord
+        vit presque toujours dans le fil.
+
+        Contrat SONDÉ en direct le 2026-08-28 (et non déduit de la doc) :
+        - le paramètre Slack s'appelle **`ts`** — envoyer `thread_ts=` seul est
+          rejeté (`invalid_arguments`) ; l'argument garde ici le nom que porte le
+          message côté appelant, la traduction se fait au transport ;
+        - le **parent est toujours rendu en `messages[0]`**, et il est **répété à
+          chaque page** : concaténer deux pages le compte deux fois ;
+        - `limit` borne les RÉPONSES (le parent est en sus : `limit=2` → 3
+          messages) et la pagination remonte le fil **du plus récent au plus
+          ancien** ;
+        - `oldest`/`latest` sont des bornes **exclusives** ; `inclusive=True` les
+          inclut ;
+        - un `ts` sans réponse rend le seul parent (`ok:true`, n=1) — ce n'est pas
+          une erreur ; un `ts` inconnu rend `thread_not_found` ;
+        - ⚠️ Slack **AVALE un paramètre inconnu en rendant `ok:true`** (mesuré :
+          `zzz_inconnu=x` rend exactement le résultat nu). N'envoyer que des
+          paramètres prouvés par différentiel — c'est le cas des six ci-dessus.
+
+        Args:
+            channel: Channel ID (`C…`/`G…`/`D…`) qui porte le fil.
+            thread_ts: `ts` du message PARENT (le `thread_ts` d'une réponse).
+            limit: Max de réponses par page (Slack plafonne à 1000, défaut utile ~50).
+            cursor: Curseur de `response_metadata.next_cursor`.
+            oldest: Ne rendre que les réponses APRÈS ce ts (exclusif).
+            latest: Ne rendre que les réponses AVANT ce ts (exclusif).
+            inclusive: Inclure les messages posés exactement sur `oldest`/`latest`.
+            as_user: Override de token ; None → même routage que `history`
+                (DM `D…` par le user token, canaux par le bot).
+
+        Returns:
+            `{messages: [parent, …réponses], has_more, response_metadata.next_cursor}`
+        """
+        if as_user is None:
+            as_user = self._prefer(want_user=channel.startswith("D"))
+        params: Dict[str, Any] = {"channel": channel, "ts": thread_ts, "limit": limit}
+        if cursor:
+            params["cursor"] = cursor
+        if oldest:
+            params["oldest"] = oldest
+        if latest:
+            params["latest"] = latest
+        if inclusive:
+            # Slack lit un booléen de query string en TEXTE ("true"/"false").
+            params["inclusive"] = "true"
+        return self._request("GET", "conversations.replies", as_user=as_user, params=params)
+
+    def channel_info(self, channel: str, as_user: Optional[bool] = None) -> Dict[str, Any]:
+        """Metadata d'un canal (`conversations.info`) — type, appartenance, archivage.
+
+        Sondé le 2026-08-28 : répond y compris sur un canal **public dont on n'est
+        pas membre** (`is_private=False, is_member=False`). C'est ce qui permet de
+        savoir si un canal est joignable par API AVANT de tenter quoi que ce soit.
+        ⚠️ Sur un canal **privé** où l'on n'est pas, la réponse est
+        `channel_not_found` — indiscernable d'un ID faux : l'aval doit dire les deux.
+
+        Args:
+            channel: Channel ID (`C…`/`G…`/`D…`).
+            as_user: Override de token ; None → bot (il porte `channels:read`).
+        """
+        if as_user is None:
+            as_user = self._prefer(want_user=False)
+        return self._request("GET", "conversations.info", as_user=as_user,
+                             params={"channel": channel})
+
+    def join_channel(self, channel: str, as_user: Optional[bool] = None) -> Dict[str, Any]:
+        """Rejoindre un canal **public** (`conversations.join`).
+
+        Ferme la moitié automatisable de oto-backend #549 : sans appartenance,
+        `conversations.history` et `chat.postMessage` rendent `not_in_channel`, et
+        une exécution planifiée ne peut ni se réparer ni le signaler.
+
+        ⚠️ **L'autre moitié n'est pas automatisable** : un canal **privé** ne se
+        rejoint par AUCUNE API — il faut qu'un humain invite l'app (`/invite @…`).
+        Ne pas appeler cette méthode sur un canal privé : la refuser en nommant le
+        geste est la seule réponse honnête.
+
+        Scope requis (sondé le 2026-08-28) : **`channels:join`** en bot token,
+        `channels:write` en user token. Sans lui, Slack rend `missing_scope` en
+        nommant le droit dans `needed` — avant même de résoudre le canal (un ID
+        inexistant rend aussi `missing_scope`).
+
+        Args:
+            channel: Channel ID public (`C…`).
+            as_user: Override de token ; None → bot (rejoindre est un acte de l'app).
+        """
+        if as_user is None:
+            as_user = self._prefer(want_user=False)
+        return self._request("POST", "conversations.join", as_user=as_user,
+                             json={"channel": channel})
 
     def open_dm(self, user: str, as_user: Optional[bool] = None) -> Dict[str, Any]:
         """
