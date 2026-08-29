@@ -633,15 +633,21 @@ class SerperClient:
     # Hôtes qui refusent SYSTÉMATIQUEMENT un scrape serveur (mur de connexion ou
     # anti-bot permanent). Y envoyer Serper coûte ~45 s — son propre timeout — pour
     # revenir bredouille à tous les coups : mesuré sur 4 jours de journal, six échecs
-    # à 45-48 s dont quatre sur des profils LinkedIn. Mieux vaut refuser tout de suite
-    # en nommant l'outil qui, lui, sait lire la source.
+    # à 45-48 s dont quatre sur des profils LinkedIn. Mieux vaut refuser tout de suite,
+    # en disant le FAIT — la source est close à l'extraction — sans prescrire un outil :
+    # ce client ne connaît pas le jeu d'outils servi à l'appelant (une CLI, un endpoint
+    # publié qui sert une liste à l'inclusion…), et un refus qui nomme une porte absente
+    # laisse l'agent avec une intention sans destination (oto-backend#632, famille de
+    # #613). Le texte d'avant nommait `unipile_*` — une famille qui n'existe même plus
+    # sous ce nom.
     #
     # La liste reste COURTE et ne contient que des refus structurels. Un site qui
     # bloque parfois n'a rien à y faire : ce garde supprime une attente inutile, il ne
     # doit pas devenir une liste noire qui prive d'un scrape qui aurait marché.
     _NEVER_SCRAPABLE = {
-        "linkedin.com": "les profils et pages LinkedIn se lisent avec les outils "
-                        "`unipile_*` (compte connecté), jamais par scrape.",
+        "linkedin.com": "les profils et pages LinkedIn ne se lisent pas par extraction "
+                        "(mur de connexion) ; si ton jeu d'outils porte un compte "
+                        "LinkedIn connecté, c'est par lui.",
         "instagram.com": "Instagram exige une session ; passe par le connecteur "
                          "messagerie ou une autre source.",
         "facebook.com": "Facebook exige une session ; cherche une autre source.",
@@ -679,7 +685,8 @@ class SerperClient:
 
         Raises:
             RuntimeError: si l'hôte refuse structurellement le scrape serveur — le
-                message nomme la source à utiliser à la place.
+                message dit le fait (source close à l'extraction) sans prescrire un
+                outil : l'appelant décide avec le jeu d'outils qu'il a.
         """
         why = self._refuses_scraping(url)
         if why:

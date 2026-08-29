@@ -3,12 +3,15 @@
 Serper met ~45 s — son propre timeout — pour renoncer sur un site qui exige une
 session. Sur quatre jours de journal : six échecs entre 45 et 48 s, dont QUATRE sur
 des profils LinkedIn, que l'agent réessayait faute de savoir que la source était
-close. Le garde rend l'échec immédiat et nomme l'outil qui sait lire la source.
+close. Le garde rend l'échec immédiat et dit le FAIT — sans prescrire un outil :
+ce client ne connaît pas le jeu d'outils servi à l'appelant (oto-backend#632).
 
 Ce qu'il ne doit PAS devenir : une liste noire. Un site qui bloque parfois mérite
 sa tentative — d'où les tests d'inclusion ET d'exclusion ci-dessous.
 """
 from __future__ import annotations
+
+import re
 
 import pytest
 
@@ -26,9 +29,15 @@ def test_a_closed_source_is_refused_immediately(url):
     assert SerperClient._refuses_scraping(url) is not None
 
 
-def test_the_refusal_names_the_right_tool():
+def test_the_refusal_prescribes_no_tool():
+    """Le refus dit le fait et laisse le chemin à l'appelant : aucun nom d'outil, aucune
+    famille `xxx_*` — dans AUCUNE des raisons (oto-backend#632). Le texte d'avant nommait
+    `unipile_*`, une famille que l'appelant n'a pas forcément, et qui n'existe même plus
+    sous ce nom."""
     why = SerperClient._refuses_scraping("https://fr.linkedin.com/in/qqun")
-    assert "unipile" in why.lower()
+    assert "ne se lisent pas par extraction" in why
+    for reason in SerperClient._NEVER_SCRAPABLE.values():
+        assert not re.search(r"(?<![\w`])[a-z]+_(?:[a-z_]+|\*)", reason), reason
 
 
 @pytest.mark.parametrize("url", [
