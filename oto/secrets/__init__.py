@@ -9,8 +9,8 @@ default); this package holds the pluggable backing stores behind a uniform
     sops      → SOPS+age encrypted YAML store (default)
     scaleway  → Scaleway Secret Manager
 
-Adding a store = a new module exposing a `lookup(name)` and one line in the
-registry below — no branching in `oto.config`.
+Adding a store = a new module exposing `lookup(name)` + `store_exists()` and
+one line in the registry below — no branching in `oto.config`.
 """
 from __future__ import annotations
 
@@ -34,10 +34,22 @@ _REGISTRY: Dict[str, Callable[[Dict[str, Any]], SecretProvider]] = {
 def make_provider(name: str, cfg: Optional[Dict[str, Any]] = None) -> SecretProvider:
     """Build the secret provider for `name`.
 
-    Unknown names fall back to the local file provider (the safe default for a
-    fresh/third-party install), matching the historical behaviour.
+    Raises on an unknown name — it used to fall back silently to the local
+    file provider, which turned a typo'd `secret_provider` (e.g. `sop`) into
+    "every secret resolves to its default", indistinguishable from a store
+    that is legitimately empty (oto-core#63). A misconfigured provider name is
+    not a missing store: it deserves a loud, named failure, not a quiet swap
+    to a different backing store the caller never asked for.
     """
-    builder = _REGISTRY.get(name, _REGISTRY["file"])
+    try:
+        builder = _REGISTRY[name]
+    except KeyError:
+        raise ValueError(
+            f"Unknown secret provider {name!r} (from `secret_provider` in "
+            f"~/.otomata/config.yaml). Valid values: "
+            f"{', '.join(sorted(_REGISTRY))}. Fix it with "
+            f"`oto config provider secrets <name>`."
+        ) from None
     return builder(cfg or {})
 
 

@@ -8,6 +8,7 @@ Secret resolution order:
 
 import os
 import json
+import warnings
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -24,6 +25,34 @@ from oto.secrets import (
 __all__ = ["get_secret", "get_json_secret", "require_secret", "AmbiguousSecretError"]
 
 _oto_config_cache: Optional[Dict[str, Any]] = None
+
+# Provider names already warned about (oto-core#63) — one warning per process,
+# not per lookup: `get_secret` is called on every connector's every call.
+_warned_store_absent: set = set()
+
+
+def _warn_once_if_store_absent(provider_name: str, provider) -> None:
+    """Surface "this provider has nothing to read" exactly once per process.
+
+    Before this, a configured provider whose backing store was absent (e.g.
+    `secret_provider: file` pointing at a renamed-away `secrets.env`) made
+    EVERY secret resolve to its `default`, with no message anywhere — total
+    silent failure, indistinguishable from "nothing is configured yet". Only
+    the CONFIGURED provider is checked here (not the file fallback below):
+    that fallback existing or not is exactly what this warning surfaces.
+    """
+    if provider_name in _warned_store_absent:
+        return
+    _warned_store_absent.add(provider_name)
+    if not provider.store_exists():
+        warnings.warn(
+            f"le magasin du fournisseur de secrets '{provider_name}' est "
+            f"introuvable ; aucun secret ne sera résolu par ce fournisseur "
+            f"tant qu'il n'est pas en place (voir "
+            f"`oto config provider secrets <file|sops|scaleway>`).",
+            RuntimeWarning,
+            stacklevel=3,
+        )
 
 
 def _get_oto_config() -> Dict[str, Any]:
@@ -90,11 +119,17 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
 
     `get_secret` is the soft accessor: it honours its contract and returns
     `default` when a secret can't be resolved — it never raises just because a
-    provider's store is absent. The hard failure (with guidance) belongs to
-    `require_secret`.
+    provider's store is absent (that case instead emits a one-time
+    `RuntimeWarning` per process, see `_warn_once_if_store_absent`). The hard
+    failure (with guidance) belongs to `require_secret`.
 
-    Exception: a key present in the vault with DIFFERENT values across files
-    raises AmbiguousSecretError — returning one of them would be arbitrary.
+    Exceptions:
+    - a key present in the vault with DIFFERENT values across files raises
+      `AmbiguousSecretError` — returning one of them would be arbitrary;
+    - an unknown `secret_provider` name (typo in `~/.otomata/config.yaml`)
+      raises `ValueError` from `make_provider` — a misconfigured provider name
+      is not a missing store, and silently swapping to a different backing
+      store is worse than failing loudly (oto-core#63).
 
     Args:
         name: Secret name (e.g., 'GROQ_API_KEY', 'SIRENE_API_KEY')
@@ -115,8 +150,11 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     if os.environ.get("OTO_CONFIG_DISABLE_SOPS") == "1":
         return default
 
-    # 2. Configured provider (may raise AmbiguousSecretError).
-    provider = make_provider(get_provider(), _get_oto_config())
+    # 2. Configured provider (may raise AmbiguousSecretError, or ValueError on
+    #    an unknown provider name — see make_provider).
+    provider_name = get_provider()
+    provider = make_provider(provider_name, _get_oto_config())
+    _warn_once_if_store_absent(provider_name, provider)
     value = provider.lookup(name)
     if value is not MISSING and value is not STORE_ABSENT:
         return value
@@ -124,7 +162,9 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     # 3. Graceful fallback to local file secrets ONLY when the configured
     #    provider's store is absent (sops default but no SOPS repo on a
     #    third-party box). A store that is present but lacks the key is
-    #    authoritative — no fallback.
+    #    authoritative — no fallback. Note: when the configured provider IS
+    #    already `file`, this can only re-read the exact same store — the
+    #    warning above is what surfaces that case, not this fallback.
     if value is STORE_ABSENT:
         value = FileProvider().lookup(name)
         if value is not MISSING:
