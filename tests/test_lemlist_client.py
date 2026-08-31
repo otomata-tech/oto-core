@@ -274,14 +274,57 @@ def test_list_campaigns_refuses_an_unknown_status(monkeypatch):
         c.list_campaigns(status="finished")
 
 
+def test_list_campaigns_accepte_les_DEUX_formes_de_reponse(monkeypatch):
+    """La doc annonce un TABLEAU ; la v2 rend un objet. Relevé en live le
+    31/08 : le code qui itérait le tableau parcourait les CLÉS du dict et
+    cassait sur `c["_id"]`, ce qui faisait tomber `status()` d'entrée."""
+    captured = _capture(monkeypatch, body={
+        "campaigns": [{"_id": "cam_1", "name": "Q3", "status": "running"}],
+        "pagination": {"totalRecords": 1, "currentPage": 1, "nextPage": 0},
+    })
+    c = lm.LemlistClient(api_key="k")
+    out = c.list_campaigns()
+    assert [x.id for x in out] == ["cam_1"]
+
+    # Et la forme v1 (tableau nu) continue de passer.
+    _capture(monkeypatch, body=[{"_id": "cam_2", "name": "Q4"}])
+    assert [x.id for x in c.list_campaigns()] == ["cam_2"]
+    assert captured  # le recorder a bien servi
+
+
+def test_list_all_campaigns_se_fie_a_la_pagination_de_la_v2(monkeypatch):
+    """`nextPage` dit où on en est ; le comptage de page courte se trompe sur
+    une dernière page pleine."""
+    pages = []
+
+    def fake_request(method, url, headers=None, **kwargs):
+        pages.append(kwargs["params"]["page"])
+        # Page pleine à chaque fois, mais la v2 annonce la fin au 2e tour.
+        next_page = 0 if len(pages) == 2 else len(pages) + 1
+        return _Resp(200, {
+            "campaigns": [{"_id": f"cam_{i}"} for i in range(100)],
+            "pagination": {"nextPage": next_page},
+        })
+
+    monkeypatch.setattr(lm.requests, "request", fake_request)
+    c = lm.LemlistClient(api_key="k")
+    campaigns, truncated = c.list_all_campaigns(max_pages=5)
+
+    assert truncated is False
+    assert len(campaigns) == 200
+    assert pages == [1, 2]
+
+
 def test_list_all_campaigns_reports_truncation_rather_than_hiding_it(monkeypatch):
     """A capped list that looks complete is the failure mode worth a test."""
     pages = []
 
     def fake_request(method, url, headers=None, **kwargs):
-        pages.append(kwargs["params"]["offset"])
-        # Always a FULL page → the walk can only end on the page cap.
-        return _Resp(200, [{"_id": f"cam_{i}"} for i in range(100)])
+        pages.append(kwargs["params"]["page"])
+        return _Resp(200, {
+            "campaigns": [{"_id": f"cam_{i}"} for i in range(100)],
+            "pagination": {"nextPage": len(pages) + 1},
+        })
 
     monkeypatch.setattr(lm.requests, "request", fake_request)
     c = lm.LemlistClient(api_key="k")
@@ -289,10 +332,11 @@ def test_list_all_campaigns_reports_truncation_rather_than_hiding_it(monkeypatch
 
     assert truncated is True
     assert len(campaigns) == 300
-    assert pages == [0, 100, 200]
+    assert pages == [1, 2, 3]
 
 
 def test_list_all_campaigns_stops_on_a_short_page(monkeypatch):
+    """Repli quand la réponse ne porte PAS de pagination (forme v1)."""
     calls = {"n": 0}
 
     def fake_request(method, url, headers=None, **kwargs):
@@ -673,7 +717,12 @@ def test_export_campaign_leads_suit_le_format_demande(monkeypatch):
 
     out = c.export_campaign_leads("cam_1", format="json")
     assert out == {"leads": []}          # JSON demandé ⇒ JSON rendu
-    assert captured["params"] == {"format": "json"}
+    # `state=all` par DÉFAUT : sans lui, l'API filtre tout et rend une liste
+    # vide qui se lit « pas de leads » (relevé en live sur une campagne d'un
+    # lead). `state=None` restaure le comportement brut de lemlist.
+    assert captured["params"] == {"format": "json", "state": "all"}
+    c.export_campaign_leads("cam_1", state=None)
+    assert captured["params"] == {}
     with pytest.raises(ValueError, match="format is"):
         c.export_campaign_leads("cam_1", format="xlsx")
 
@@ -740,6 +789,11 @@ def test_list_tasks_serialise_ses_filtres_en_chaine_json(monkeypatch):
 
     assert captured["params"]["page"] == 2
     assert captured["params"]["filters"] == '[{"filterId": "fullName", "value": "Ada"}]'
+
+    # Et SURTOUT sans filtre : `filters` est documenté optionnel mais ne l'est
+    # pas (400 « Malformed filters » en live). Le tableau vide part toujours.
+    c.list_tasks()
+    assert captured["params"] == {"filters": "[]"}
 
 
 def test_get_activities_envoie_toujours_version_v2(monkeypatch):
@@ -821,3 +875,59 @@ def test_create_persona_et_watch_list_bornent_leurs_enums(monkeypatch):
     with pytest.raises(ValueError, match="signal_processing_type"):
         c.create_watch_list("Levées", type="companyRaisedFunds",
                             signal_processing_type="send_now")
+
+
+def test_un_corps_non_json_annonce_json_ne_casse_pas_lappel(monkeypatch):
+    """Relevé en live : `POST /v2/unsubscribes/contacts/{id}` répond 200 avec
+    `Content-Type: application/json` et le TEXTE NU « Contact subscription
+    updated ». `.json()` levait sur une réponse réussie."""
+    class _Texte(_Resp):
+        def json(self):
+            raise ValueError("Expecting value: line 1 column 1 (char 0)")
+
+    def fake_request(method, url, headers=None, **kwargs):
+        return _Texte(200, None)
+
+    monkeypatch.setattr(lm.requests, "request", fake_request)
+    c = lm.LemlistClient(api_key="k")
+    assert c.unsubscribe_contact("ctc_1") == {"message": "None"}
+
+
+# --- Écarts doc↔API relevés EN LIVE le 2026-08-31 ------------------------------
+#
+# Chacun de ces cas est un champ que la doc lemlist annonce optionnel et que
+# l'API exige, ou un défaut qui ne fait pas ce qu'il annonce. Aucun n'était
+# visible sans clé réelle : c'est la raison d'être de ce bloc.
+
+
+def test_create_task_refuse_localement_un_record_id_manquant(monkeypatch):
+    """L'API répond `400 recordId is required` là où la doc le dit optionnel.
+    Refusé au bord pour que le message dise QUOI fournir."""
+    _capture(monkeypatch, body={})
+    c = lm.LemlistClient(api_key="k")
+    with pytest.raises(ValueError, match="record_id is required"):
+        c.create_task(task_type="manual", assigned_to="usr_1", due_date="2026-09-05")
+
+
+def test_create_watch_list_envoie_les_quatre_champs_faussement_optionnels(monkeypatch):
+    """`filters`, `segmentType`, `signalProcessingType` et `activate` sont tous
+    exigés. `activate` surtout : l'omettre rend une erreur qui accuse les deux
+    autres champs, pourtant présents."""
+    captured = _capture(monkeypatch, body={"data": {"_id": "wat_1"}})
+    c = lm.LemlistClient(api_key="k")
+    c.create_watch_list("Levées", type="companyRaisedFunds")
+
+    assert captured["json"] == {
+        "name": "Levées", "type": "companyRaisedFunds",
+        "filters": [], "segmentType": "all",
+        "signalProcessingType": "manual", "activate": False,
+    }
+    # `activate` part MÊME à False : c'est l'absence de la clé qui est refusée.
+    assert "activate" in captured["json"]
+
+
+def test_list_tasks_envoie_toujours_filters(monkeypatch):
+    captured = _capture(monkeypatch, body={"results": []})
+    c = lm.LemlistClient(api_key="k")
+    c.list_tasks()
+    assert captured["params"] == {"filters": "[]"}

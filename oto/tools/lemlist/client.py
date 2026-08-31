@@ -149,9 +149,19 @@ class LemlistClient:
 
         if as_text:
             return response.text
-        if response.content:
+        if not response.content:
+            return {}
+        try:
             return response.json()
-        return {}
+        except ValueError:
+            # lemlist annonce `Content-Type: application/json` et rend parfois du
+            # TEXTE NU — relevé en live le 2026-08-31 sur
+            # `POST/DELETE /v2/unsubscribes/contacts/{id}`, qui répond 200
+            # « Contact subscription updated ». `.json()` levait alors sur une
+            # réponse pourtant réussie, et l'appel remontait comme une panne.
+            # On rend le texte plutôt que de le perdre : l'appelant voit ce que
+            # lemlist a dit, et rien ne casse.
+            return {"message": response.text}
 
     @staticmethod
     def _flag_params(**flags: bool) -> Dict[str, str]:
@@ -213,25 +223,48 @@ class LemlistClient:
         A caller that needs the WHOLE workspace must use `list_all_campaigns` —
         this one truncates at the page size, and says nothing about it.
         """
-        if status is not None and status not in self.CAMPAIGN_STATUSES:
+        params = self._campaign_params(
+            limit=limit, offset=offset, page=page, status=status,
+            created_by=created_by, sort_order=sort_order)
+        rows, _ = self._campaign_page(
+            self._request("GET", "campaigns", params=params))
+        return rows
+
+    @classmethod
+    def _campaign_params(
+        cls, *, limit=None, offset=None, page=None, status=None,
+        created_by=None, sort_order=None,
+    ) -> Dict[str, Any]:
+        """Query de `GET /campaigns`, partagée par la page et le parcours."""
+        if status is not None and status not in cls.CAMPAIGN_STATUSES:
             raise ValueError(
-                f"status must be one of {self.CAMPAIGN_STATUSES}, got {status!r}")
-        params = {"version": "v2"}
-        if limit is not None:
-            params["limit"] = limit
-        if offset is not None:
-            params["offset"] = offset
-        if page is not None:
-            params["page"] = page
-        if status is not None:
-            params["status"] = status
-        if created_by is not None:
-            params["createdBy"] = created_by
+                f"status must be one of {cls.CAMPAIGN_STATUSES}, got {status!r}")
+        params: Dict[str, Any] = {"version": "v2"}
+        for key, value in (("limit", limit), ("offset", offset), ("page", page),
+                           ("status", status), ("createdBy", created_by)):
+            if value is not None:
+                params[key] = value
         if sort_order is not None:
             params["sortBy"] = "createdAt"
             params["sortOrder"] = sort_order
-        data = self._request("GET", "campaigns", params=params)
-        return [self._campaign(c) for c in data]
+        return params
+
+    @classmethod
+    def _campaign_page(cls, data: Any) -> tuple[List[Campaign], Optional[dict]]:
+        """Découpe une page de campagnes en `(campagnes, pagination)`.
+
+        ⚠️ DEUX formes, et la doc n'en annonce qu'une. Le schéma OpenAPI de
+        `GET /campaigns` décrit un TABLEAU ; c'est vrai en v1, faux en v2, qui
+        rend `{"campaigns": [...], "pagination": {...}}`. Vérifié en live le
+        2026-08-31 : le code qui itérait le tableau parcourait donc les CLÉS du
+        dict et cassait sur `c["_id"]` (« string indices must be integers ») —
+        `status()` tombait dès le premier appel. On accepte les deux plutôt que
+        de parier sur la doc.
+        """
+        if isinstance(data, dict):
+            rows = data.get("campaigns") or []
+            return [cls._campaign(c) for c in rows], data.get("pagination")
+        return [cls._campaign(c) for c in (data or [])], None
 
     def list_all_campaigns(
         self, *, max_pages: int = 20, **filters,
@@ -245,13 +278,20 @@ class LemlistClient:
         gets answered wrongly.
         """
         out: List[Campaign] = []
-        offset = 0
-        for _ in range(max_pages):
-            batch = self.list_campaigns(limit=self.PAGE_MAX, offset=offset, **filters)
+        params = dict(filters)
+        for page in range(1, max_pages + 1):
+            data = self._request("GET", "campaigns", params={
+                **self._campaign_params(limit=self.PAGE_MAX, page=page, **params),
+            })
+            batch, pagination = self._campaign_page(data)
             out.extend(batch)
-            if len(batch) < self.PAGE_MAX:
+            # La v2 dit elle-même où elle en est ; s'y fier bat le comptage de
+            # page courte, qui se trompe sur une dernière page pleine.
+            if pagination is not None:
+                if not pagination.get("nextPage"):
+                    return out, False
+            elif len(batch) < self.PAGE_MAX:
                 return out, False
-            offset += self.PAGE_MAX
         return out, True
 
     def get_campaign(self, campaign_id: str) -> Dict[str, Any]:
@@ -281,6 +321,17 @@ class LemlistClient:
 
         Returns the campaign, including `sequenceId` and `scheduleIds` — the two
         ids every other management call needs.
+
+        ⚠️ **Une campagne créée par l'API naît `state="running"`, pas en
+        brouillon** (vérifié en live le 2026-08-31 ; `duplicate_campaign`, lui,
+        rend bien `paused`). Le `status` qu'affichent `get_campaign` et
+        `list_campaigns` vaut « draft », mais c'est un statut D'AFFICHAGE dérivé
+        de l'absence d'étape et de lead, pas l'état d'exécution. Conséquences :
+        `start_campaign` répond `400 "already running"` sur une campagne
+        fraîche, et rien ne « démarre » l'envoi — ce sont l'ajout d'un
+        expéditeur, d'une étape et d'un lead LANCÉ qui le font. Le verrou qui
+        reste est la revue par lead (`launch_lead`). Pour construire une
+        campagne tranquillement : `pause_campaign` juste après la création.
         """
         body: Dict[str, Any] = {"name": name}
         if timezone is not None:
@@ -305,19 +356,29 @@ class LemlistClient:
                 f"expected any of {cls.AUTO_REVIEW_CONDITIONS}")
 
     def start_campaign(self, campaign_id: str) -> Dict[str, Any]:
-        """Start (or resume) a campaign — a no-op if it is already running.
+        """Start (or resume) a campaign.
 
         ⚠️ This is the call that puts real messages on the wire: from here
-        lemlist walks the sequence for every launched lead. Nothing else in this
-        client, `launch_lead` aside, has that effect.
+        lemlist walks the sequence for every launched lead.
+
+        ⚠️ La doc annonce « no-op si déjà lancée » ; c'est FAUX — l'API répond
+        `400 "You can't start campaigns that are already running."` (vérifié en
+        live le 2026-08-31). Et comme une campagne créée par l'API est DÉJÀ
+        `running` (cf. `create_campaign`), cet appel ne sert en pratique qu'à
+        REPRENDRE une campagne mise en pause.
         """
         return self._request("POST", f"campaigns/{campaign_id}/start")
 
     def pause_campaign(self, campaign_id: str) -> Dict[str, Any]:
-        """Pause a campaign — a no-op if it is not running.
+        """Pause a campaign — LE vrai interrupteur.
 
         Already-scheduled leads are untouched (lemlist's own wording): pausing
         stops the campaign advancing, it does not recall what is queued.
+
+        ⚠️ Là aussi la doc annonce un no-op et l'API répond
+        `400 "You can't pause campaigns that are not running."`. Comme une
+        campagne créée par l'API naît `running`, c'est CE geste — et non
+        `start_campaign` — qui décide si elle peut envoyer.
         """
         return self._request("POST", f"campaigns/{campaign_id}/pause")
 
@@ -1237,7 +1298,10 @@ class LemlistClient:
                 `enrichmentRequests` uses the v2 vocabulary — `find_email`,
                 `find_phone`, `verify`, `linkedin_enrichment` (see
                 `ENRICH_BULK_ACTIONS`). `metadata` is echoed back, use it to
-                match ids to your own rows.
+                match ids to your own rows. ⚠️ Ses VALEURS doivent être des
+                CHAÎNES : `{"row": 1}` est rejeté (`WRONG_METADATA_FORMAT`),
+                `{"row": "1"}` passe — vérifié en live le 2026-08-31, là où la
+                doc dit seulement « string or object ».
             webhook_url: notified as each enrichment completes.
 
         Returns one entry per item, in order — `{"id": "enr_...", "metadata": ...}`
@@ -1921,12 +1985,16 @@ class LemlistClient:
     def list_tasks(self, *, page: int = None, filters: List[dict] = None) -> Any:
         """List tasks. `filters` is a list of `{filterId, …}` objects, sent as a
         JSON array STRING in the query — the same encoding trap as the stats
-        `channels`."""
-        params: Dict[str, Any] = {}
+        `channels`.
+
+        ⚠️ `filters` est documenté OPTIONNEL et ne l'est pas : sans lui l'API
+        répond `400 {"error": "Malformed filters"}`. Vérifié en live le
+        2026-08-31 — un tableau VIDE suffit, donc on l'envoie toujours. C'est
+        exactement le genre d'écart qu'aucun test de charge ne voit.
+        """
+        params: Dict[str, Any] = {"filters": json.dumps(filters or [])}
         if page is not None:
             params["page"] = page
-        if filters is not None:
-            params["filters"] = json.dumps(filters)
         return self._request("GET", "tasks", params=params)
 
     def create_task(
@@ -1942,7 +2010,19 @@ class LemlistClient:
         images: List[str] = None,
         videos: List[str] = None,
     ) -> Dict[str, Any]:
-        """Create a manual task assigned to a user. Sends nothing by itself."""
+        """Create a manual task assigned to a user. Sends nothing by itself.
+
+        ⚠️ `record_id` est documenté OPTIONNEL et ne l'est pas : sans lui l'API
+        répond `400 {"error": "recordId is required"}` (vérifié en live le
+        2026-08-31). C'est l'id du contact ou du lead auquel la tâche se
+        rattache — une tâche lemlist n'existe pas hors d'un enregistrement.
+        Refusé ici pour que le message dise QUOI fournir.
+        """
+        if not record_id:
+            raise ValueError(
+                "record_id is required by the API despite being documented "
+                "optional — pass the contact (ctc_…) or lead (lea_…) the task "
+                "hangs off")
         if task_type not in self.TASK_TYPES:
             raise ValueError(
                 f"task_type must be one of {self.TASK_TYPES}, got {task_type!r}")
@@ -2005,16 +2085,32 @@ class LemlistClient:
         type: str,
         filters: List[Any] = None,
         emoji: str = None,
-        segment_type: str = None,
-        signal_processing_type: str = None,
+        segment_type: str = "all",
+        signal_processing_type: str = "manual",
         signal_opportunity_template: dict = None,
-        activate: bool = None,
+        activate: bool = False,
     ) -> Dict[str, Any]:
         """Create a watch list.
 
         ⚠️ `signal_processing_type="push_to_campaign"` + `activate=True` makes
         this list feed a campaign on its own — the one configuration here that
-        can end in messages being sent without a further call.
+        can end in messages being sent without a further call. D'où
+        `activate=False` par défaut : une liste naît en brouillon.
+
+        ⚠️ QUATRE champs documentés optionnels sont OBLIGATOIRES — `filters`,
+        `segmentType`, `signalProcessingType`, `activate` (vérifié en live le
+        2026-08-31) ; les trois derniers ont donc un défaut ici. Le pire est
+        `activate` : l'omettre déclenche `400 "activate requires both
+        segmentType and signalProcessingType"`, un message qui accuse les DEUX
+        AUTRES champs, pourtant bien présents.
+
+        `filters` reste à fournir et dépend du `type` : chaque type a ses
+        filtres requis (`companyIsHiring` exige `title`, `location` et
+        `maxIdentificationsPerDay`). Les VALEURS doivent être canoniques, telles
+        que rendues par `get_watch_list_filter_values` — une chaîne libre est
+        rejetée (`INVALID_FILTER_VALUE`) — et les valeurs numériques voyagent en
+        CHAÎNES (`{"filterId": "maxIdentificationsPerDay", "in": ["5"]}`). Lis
+        `get_watch_list_filters(type=…)` avant de construire la charge.
         """
         if type not in self.WATCH_LIST_TYPES:
             raise ValueError(
@@ -2024,12 +2120,17 @@ class LemlistClient:
             raise ValueError(
                 f"signal_processing_type must be one of {self.SIGNAL_PROCESSING}, "
                 f"got {signal_processing_type!r}")
-        body: Dict[str, Any] = {"name": name, "type": type}
+        body: Dict[str, Any] = {
+            "name": name, "type": type,
+            "filters": filters or [],
+            "segmentType": segment_type,
+            "signalProcessingType": signal_processing_type,
+            # Envoyé même à False : c'est l'ABSENCE de la clé que l'API refuse.
+            "activate": bool(activate),
+        }
         for key, value in (
-            ("filters", filters), ("emoji", emoji), ("segmentType", segment_type),
-            ("signalProcessingType", signal_processing_type),
+            ("emoji", emoji),
             ("signalOpportunityTemplate", signal_opportunity_template),
-            ("activate", activate),
         ):
             if value is not None:
                 body[key] = value
@@ -2134,16 +2235,26 @@ class LemlistClient:
         return self._request(
             "PUT", f"campaigns/{campaign_id}/export/{export_id}/email/{email}")
 
+    _UNSET = object()
+
     def export_campaign_leads(
-        self, campaign_id: str, *, state: str = None, format: str = None,
+        self, campaign_id: str, *, state: Any = _UNSET, format: str = None,
     ) -> Any:
         """Export a campaign's leads (`GET /campaigns/{id}/export/leads`).
 
         `format` is `csv` (the API default) or `json`. CSV comes back as text,
         JSON as parsed data — the return type follows the format asked for.
+
+        ⚠️ `state` vaut `"all"` par défaut ICI, et ce n'est PAS le défaut de
+        lemlist. Vérifié en live le 2026-08-31 : sans `state`, une campagne d'un
+        lead rend une liste VIDE (et un CSV réduit à son en-tête). Le défaut de
+        l'API filtre donc tout, ce qui se lit comme « pas de leads » plutôt que
+        « mauvais filtre » — silencieux, et faux. `state=None` restaure le
+        comportement brut.
         """
         if format is not None and format not in ("json", "csv"):
             raise ValueError(f"format is 'json' or 'csv', got {format!r}")
+        state = "all" if state is self._UNSET else state
         params = {k: v for k, v in {"state": state, "format": format}.items()
                   if v is not None}
         return self._request(
