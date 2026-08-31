@@ -10,9 +10,12 @@ consolidation trick is needed.
 Derived from Tally's OpenAPI 3.0.1 spec
 (`https://developers.tally.so/api-reference/openapi.json`, read 2026-08-31) —
 required fields, body shapes, enums and `limit` bounds are all spec-derived,
-not guessed from doc prose. **NOT live-tested yet**: no `tly-` key was
-available when this was written. Everything below that says "confirmed" means
-confirmed against the spec; nothing here claims to have been run.
+not guessed from doc prose — **et testé en live le 2026-08-31** avec une vraie
+clé `tly-` (compte FREE) : identité, formulaires (création → lecture → PATCH →
+corbeille), questions, réponses, les cinq vues d'analytics et le cycle complet
+d'un webhook (création → liste → journal → PATCH → suppression) répondent
+exactement comme codé. Ce que ce compte n'a PAS permis d'exercer est dit plus
+bas, nommément.
 
 ## The version header is not optional
 
@@ -33,12 +36,41 @@ returns nothing for a key made at launch.
 So this client **always sends `tally-version`**, defaulting to
 `DEFAULT_API_VERSION` below. Callers can override per client instance.
 
-⚠️ `DEFAULT_API_VERSION` is the date of the most recent entry in Tally's
-public changelog (2026-08-04, "v0.10.0"), which is the version the current
-spec describes. It has NOT been confirmed to be an accepted header value —
-that requires a real key. If Tally rejects it, the fix is one constant, and
-`api_version=None` disables the header entirely (falling back to whatever the
-key is pinned to).
+`DEFAULT_API_VERSION` is the date of the most recent entry in Tally's public
+changelog (2026-08-04, "v0.10.0"), which is the version the current spec
+describes. **Confirmed accepted in live on 2026-08-31** — every call in this
+module was made with that header. `api_version=None` disables the header
+entirely, falling back to whatever the key is pinned to.
+
+## Les enveloppes de liste, relevées en live — le spec ne les tranchait pas
+
+Il n'y a PAS une forme de liste, il y en a quatre, et deux d'entre elles ne se
+devinent pas (relevé 2026-08-31) :
+
+| appel | enveloppe |
+|---|---|
+| `GET /forms`, `GET /workspaces` | `{items, page, limit, total, hasMore}` |
+| `GET /webhooks` | `{webhooks, page, limit, hasMore, totalCount}` — **pas** `items` |
+| `GET /webhooks/{id}/events` | `{page, limit, hasMore, totalNumberOfEvents, events}` |
+| `GET /forms/{id}/questions` | `{questions, hasResponses}` |
+| `GET /forms/{id}/submissions` | `{page, limit, hasMore, totalNumberOfSubmissionsPerFilter, questions, submissions}` |
+| `GET /organizations/{id}/users`, `.../invites` | **un tableau nu**, sans enveloppe |
+
+`PATCH /webhooks/{id}` et les `DELETE` rendent un **corps vide** (d'où le
+`return None` du transport sur un corps vide, pas seulement sur un 204).
+
+## Un 401 de Tally ne veut pas dire « clé invalide »
+
+Relevé en live, et c'est le piège le plus coûteux de cette API :
+
+- `GET /webhooks` rend **401** tant qu'aucun webhook n'a JAMAIS été créé sur le
+  compte. Après une première création il rend 200 — et continue de rendre 200
+  même une fois tous les webhooks supprimés. Le 401 dit « l'intégration
+  webhooks n'existe pas encore », pas « ta clé est mauvaise ».
+- `GET /forms/{id}/blocks` et `POST /workspaces` rendent **401** sur un plan
+  FREE (gate de plan, pas d'authentification).
+
+La sonde qui tranche est `get_me()` : si elle répond, la clé est bonne.
 
 ## Rate limit
 
