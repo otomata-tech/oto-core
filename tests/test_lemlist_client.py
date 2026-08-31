@@ -558,3 +558,266 @@ def test_reports_join_the_ids_into_one_query_parameter(monkeypatch):
     assert captured["params"] == {"campaignIds": "cam_1,cam_2"}
     with pytest.raises(ValueError, match="nothing to report on"):
         c.get_campaign_reports([])
+
+
+# --- Couverture intégrale : les encodages qui ne se devinent pas ---------------
+#
+# 105 méthodes s'ajoutent d'un coup ; les tester une à une dirait surtout que le
+# code fait ce qu'il fait. Ce qui est verrouillé ici est la POIGNÉE de contrats
+# qu'une réécriture innocente casse sans bruit : où voyage l'identifiant (chemin,
+# query ou corps — lemlist utilise les trois pour la MÊME ressource), ce qu'un
+# paramètre omis vaut par défaut, et quelles routes rendent du texte et non du
+# JSON.
+
+
+def test_delete_lead_desinscrit_par_defaut_et_supprime_sur_demande(monkeypatch):
+    """Le défaut est le geste DOUX, et le nom de la méthode dit l'autre."""
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.delete_lead("cam_1", "a@acme.fr")
+    assert captured["method"] == "DELETE"
+    assert captured["url"].endswith("/campaigns/cam_1/leads/a@acme.fr")
+    assert captured["params"] is None  # aucun `action` ⇒ désinscription
+
+    c.delete_lead("cam_1", "a@acme.fr", action="remove")
+    assert captured["params"] == {"action": "remove"}
+
+    c.unsubscribe_lead("cam_1", "a@acme.fr")
+    assert captured["params"] is None
+
+
+def test_les_variables_de_lead_voyagent_en_QUERY_pas_en_corps(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.update_lead_variables("lea_1", {"industry": "SaaS"})
+    assert captured["method"] == "PATCH"
+    assert captured["params"] == {"industry": "SaaS"}
+    assert "json" not in captured
+
+    # À la suppression, c'est la PRÉSENCE de la clé qui est l'instruction.
+    c.delete_lead_variables("lea_1", ["industry", "icp"])
+    assert captured["method"] == "DELETE"
+    assert captured["params"] == {"industry": "", "icp": ""}
+    with pytest.raises(ValueError, match="nothing to erase"):
+        c.delete_lead_variables("lea_1", [])
+
+
+def test_pause_lead_sans_campagne_vise_TOUTES_les_campagnes(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.pause_lead("lea_1")
+    assert captured["url"].endswith("/leads/pause/lea_1")
+    assert captured["params"] is None  # portée LARGE, pas étroite
+
+    c.pause_lead("lea_1", campaign_id="cam_1")
+    assert captured["params"] == {"campaignId": "cam_1"}
+
+
+def test_marquage_dinteret_change_de_route_selon_la_portee(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.mark_lead_interested("a@acme.fr")
+    assert captured["url"].endswith("/leads/interested/a@acme.fr")
+
+    c.mark_lead_interested("a@acme.fr", campaign_id="cam_1")
+    assert captured["url"].endswith("/campaigns/cam_1/leads/a@acme.fr/interested")
+
+    c.mark_lead_not_interested("a@acme.fr", campaign_id="cam_1")
+    assert captured["url"].endswith("/campaigns/cam_1/leads/a@acme.fr/notinterested")
+
+
+def test_upload_audio_est_la_seule_route_multipart(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+    c.upload_lead_audio("lea_1", "stp_1", b"\x00\x01", filename="voix.mp3")
+
+    assert captured["url"].endswith("/leads/audio")
+    assert captured["params"] == {"leadId": "lea_1", "stepId": "stp_1"}
+    assert captured["files"] == {"file": ("voix.mp3", b"\x00\x01")}
+
+
+def test_les_exports_rendent_du_TEXTE_et_non_du_json(monkeypatch):
+    """`.json()` sur un CSV lèverait sur une réponse pourtant parfaite."""
+    captured = {}
+
+    class _Csv(_Resp):
+        def json(self):
+            raise AssertionError("un export CSV ne doit pas être parsé en JSON")
+
+    def fake_request(method, url, headers=None, **kwargs):
+        captured.update(method=method, url=url, **kwargs)
+        return _Csv(200, None)
+
+    monkeypatch.setattr(lm.requests, "request", fake_request)
+    c = lm.LemlistClient(api_key="k")
+
+    assert c.export_unsubscribes() == "None"
+    # Abréviation de lemlist : /unsubs/, pas /unsubscribes/.
+    assert captured["url"].endswith("/unsubs/export")
+
+    c.export_unsubscribed_variables()
+    assert captured["url"].endswith("/v2/unsubscribes/exports/variables")
+    c.export_unsubscribed_contacts()
+    assert captured["url"].endswith("/v2/unsubscribes/exports/contacts")
+    c.export_contact_list("lst_1", entity="company")
+    assert captured["params"] == {"listId": "lst_1", "entity": "company"}
+
+
+def test_export_campaign_leads_suit_le_format_demande(monkeypatch):
+    captured = _capture(monkeypatch, body={"leads": []})
+    c = lm.LemlistClient(api_key="k")
+
+    out = c.export_campaign_leads("cam_1", format="json")
+    assert out == {"leads": []}          # JSON demandé ⇒ JSON rendu
+    assert captured["params"] == {"format": "json"}
+    with pytest.raises(ValueError, match="format is"):
+        c.export_campaign_leads("cam_1", format="xlsx")
+
+
+def test_bulk_unsubscribe_borne_les_10000(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.bulk_unsubscribe_variables(["a@x.fr", "b@x.fr"])
+    assert captured["json"] == {"values": ["a@x.fr", "b@x.fr"]}
+    with pytest.raises(ValueError, match="at most 10 000"):
+        c.bulk_unsubscribe_variables([f"{i}@x.fr" for i in range(10001)])
+    with pytest.raises(ValueError, match="nothing to unsubscribe"):
+        c.bulk_unsubscribe_variables([])
+
+
+def test_manage_contact_list_ajoute_par_defaut(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.manage_contact_list("lst_1", ["ctc_1"])
+    assert captured["params"] is None    # pas d'action ⇒ AJOUT
+    assert captured["json"] == {"contactIds": ["ctc_1"]}
+
+    c.manage_contact_list("lst_1", ["ctc_1"], action="remove")
+    assert captured["params"] == {"action": "remove"}
+    with pytest.raises(ValueError, match='action is "remove"'):
+        c.manage_contact_list("lst_1", ["ctc_1"], action="delete")
+
+
+def test_le_meme_id_de_watchlist_voyage_a_trois_endroits(monkeypatch):
+    """Corps au PATCH, query au DELETE, chemin sur les signaux — trois
+    placements pour une seule ressource, tous documentés ainsi."""
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.update_watch_list("wl_1", {"name": "Levées FR"})
+    assert captured["method"] == "PATCH"
+    assert captured["url"].endswith("/watchlist")
+    assert captured["json"] == {"name": "Levées FR", "watchListId": "wl_1"}
+
+    c.delete_watch_list("wl_1")
+    assert captured["method"] == "DELETE"
+    assert captured["params"] == {"watchListId": "wl_1"}
+
+    c.push_external_signals(
+        "wl_1", contact={"linkedinUrl": "u"}, company={"domain": "x.fr", "name": "X"})
+    assert captured["url"].endswith("/watchlist/wl_1/external-signals")
+
+
+def test_update_task_met_lid_dans_le_corps(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+    c.update_task("tsk_1", {"done": True})
+
+    assert captured["url"].endswith("/tasks")   # aucun segment d'id
+    assert captured["json"] == {"done": True, "id": "tsk_1"}
+
+
+def test_list_tasks_serialise_ses_filtres_en_chaine_json(monkeypatch):
+    captured = _capture(monkeypatch, body=[])
+    c = lm.LemlistClient(api_key="k")
+    c.list_tasks(page=2, filters=[{"filterId": "fullName", "value": "Ada"}])
+
+    assert captured["params"]["page"] == 2
+    assert captured["params"]["filters"] == '[{"filterId": "fullName", "value": "Ada"}]'
+
+
+def test_get_activities_envoie_toujours_version_v2(monkeypatch):
+    """La doc marque `version` REQUIS sur cette route ; l'appel l'omettait."""
+    captured = _capture(monkeypatch, body=[])
+    c = lm.LemlistClient(api_key="k")
+    c.get_activities(campaign_id="cam_1", type="emailsReplied", lead_id="lea_1")
+
+    assert captured["params"]["version"] == "v2"
+    assert captured["params"]["type"] == "emailsReplied"
+    assert captured["params"]["leadId"] == "lea_1"
+
+
+def test_attach_inbox_labels_dit_explicitement_sil_ajoute_ou_remplace(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.attach_inbox_labels("ctc_1", ["lbl_1"])
+    assert captured["json"] == {"labelIds": ["lbl_1"], "appendLabels": True}
+
+    c.attach_inbox_labels("ctc_1", ["lbl_1"], append=False)
+    assert captured["json"]["appendLabels"] is False
+
+
+def test_les_brouillons_exigent_leur_proprietaire(monkeypatch):
+    captured = _capture(monkeypatch, body={"_id": "drf_1"})
+    c = lm.LemlistClient(api_key="k")
+
+    c.create_draft("ctc_1", "usr_1", channel="email", content="hello", subject="hi")
+    assert captured["url"].endswith("/inbox/ctc_1/drafts")
+    assert captured["params"] == {"draftOwner": "usr_1"}
+    assert captured["json"] == {"channel": "email", "content": "hello", "subject": "hi"}
+
+    with pytest.raises(ValueError, match="channel must be one of"):
+        c.create_draft("ctc_1", "usr_1", channel="pigeon", content="x")
+
+
+def test_les_trois_envois_dinbox_portent_leurs_champs_obligatoires(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.send_inbox_email(
+        send_user_id="usr_1", send_user_email="me@x.fr",
+        send_user_mailbox_id="mbx_1", message="hello", contact_id="ctc_1")
+    assert captured["url"].endswith("/inbox/email")
+    assert captured["json"]["sendUserMailboxId"] == "mbx_1"
+
+    c.send_linkedin_message(
+        send_user_id="usr_1", lead_id="lea_1", contact_id="ctc_1", message="hi")
+    assert captured["url"].endswith("/inbox/linkedin")
+
+    c.send_whatsapp_message(
+        send_user_id="usr_1", send_user_whatsapp_account_id="wa_1",
+        lead_id="lea_1", contact_id="ctc_1", message="hi")
+    assert captured["json"]["sendUserWhatsappAccountId"] == "wa_1"
+
+
+def test_une_alerte_de_delivrabilite_refuse_un_vocabulaire_inconnu(monkeypatch):
+    _capture(monkeypatch, body={"_id": "alr_1"})
+    c = lm.LemlistClient(api_key="k")
+    base = dict(widget="warmup", metric="inboxRate", severity="critical",
+                scope="global", threshold=90, comparison_operator="below",
+                period_days=7, period_mode="rolling")
+
+    c.create_deliverability_alert(**base)
+    for bad in ({"metric": "vibes"}, {"scope": "planet"},
+                {"comparison_operator": "近"}, {"period_mode": "sometimes"}):
+        with pytest.raises(ValueError, match="must be one of"):
+            c.create_deliverability_alert(**{**base, **bad})
+
+
+def test_create_persona_et_watch_list_bornent_leurs_enums(monkeypatch):
+    _capture(monkeypatch, body={"_id": "x"})
+    c = lm.LemlistClient(api_key="k")
+    with pytest.raises(ValueError, match="mode is"):
+        c.create_persona("ICP", filters=[], mode="humans")
+    with pytest.raises(ValueError, match="type must be one of"):
+        c.create_watch_list("Levées", type="companyDidSomething")
+    with pytest.raises(ValueError, match="signal_processing_type"):
+        c.create_watch_list("Levées", type="companyRaisedFunds",
+                            signal_processing_type="send_now")
