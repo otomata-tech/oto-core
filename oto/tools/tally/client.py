@@ -28,10 +28,16 @@ This matters more than it sounds for a multi-tenant connector: without an
 explicit header, the SAME endpoint returns a DIFFERENT shape depending on when
 each customer happened to create their key. Tally's own docs demonstrate it —
 the `fetching-form-submissions` page (written against an early version) shows
-a submission whose responses carry only `answer`, while the current spec adds
-`formattedAnswer`, `previewUrl` and `pdfUrl`. Code that reads
-`formattedAnswer` therefore works for a key made this year and silently
-returns nothing for a key made at launch.
+submissions with no `previewUrl` and no `pdfUrl`, both of which the current
+version does return (verified live 2026-08-31).
+
+⚠️ **`formattedAnswer` is documented by the spec and was NOT returned in live**
+on any of the three question types exercised (INPUT_TEXT, INPUT_EMAIL,
+FILE_UPLOAD), even with the header pinned. The plausible reading is that it
+only appears where the raw `answer` is not already readable — a choice
+question whose `answer` is an option id — but that is UNVERIFIED: no
+choice-type question was tested. Never rely on it being present; the tool
+layer falls back to `answer`.
 
 So this client **always sends `tally-version`**, defaulting to
 `DEFAULT_API_VERSION` below. Callers can override per client instance.
@@ -71,6 +77,23 @@ Relevé en live, et c'est le piège le plus coûteux de cette API :
   FREE (gate de plan, pas d'authentification).
 
 La sonde qui tranche est `get_me()` : si elle répond, la clé est bonne.
+
+## ⚠️ Les URL rendues portent des jetons signés
+
+Trois champs d'une réponse embarquent un `accessToken` (un JWT) et une
+`signature` dans leur query string — vérifié en live :
+
+- `submissions[].previewUrl` — la page de la réponse ;
+- `submissions[].pdfUrl` — le PDF de la réponse ;
+- l'`answer` d'une question `FILE_UPLOAD` — chaque fichier déposé, sur
+  `storage.tally.so/private/...`.
+
+Ce ne sont pas des URL publiques : le jeton EST le droit d'accès. Elles
+traversent donc le contexte de l'agent et tout ce qui journalise un résultat
+d'outil. Le client ne les retire pas — sans elles le fichier est inatteignable,
+et c'est précisément ce à quoi il sert — mais quiconque journalise, met en
+cache ou re-publie une réponse doit savoir qu'il manipule un porteur de droit,
+pas une référence inerte.
 
 ## Rate limit
 
