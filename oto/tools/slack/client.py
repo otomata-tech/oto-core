@@ -11,6 +11,9 @@ from typing import Optional, Dict, Any, List
 import requests
 
 from ...config import require_secret, get_secret
+from .text import MAX_TEXT_LEN as _MAX_TEXT_LEN
+from .text import chunk_text as _chunk_text
+from .text import escape_false_emoji_shortcodes as _escape_false_emoji_shortcodes
 
 _HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
 
@@ -218,28 +221,56 @@ class SlackClient:
         as_user: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """
-        Send a message to a channel or DM.
+        Send a message to a channel or DM. A bare clock time or any other
+        colon-bounded number in `text` is escaped so Slack cannot misread it
+        as an emoji shortcode (`:51:`) — see `_escape_false_emoji_shortcodes`.
+
+        `text` longer than Slack's recommended 4,000 characters is SPLIT into
+        several `chat.postMessage` calls rather than left for Slack to
+        silently truncate at 40,000: the first part keeps `thread_ts` (a new
+        top-level message if none was given), every later part threads under
+        the FIRST part's `ts`. The response then carries `ts_all` (every ts
+        produced, in order) in addition to `ts` (always the first — the one
+        to reuse for a further reply in the same thread).
 
         Args:
             channel: Channel ID or name
             text: Message text (fallback for blocks)
-            blocks: Block Kit blocks
+            blocks: Block Kit blocks — bypasses splitting/escaping (caller-built).
             thread_ts: Thread timestamp for reply
             as_user: True = post via user token (appears as the human user).
                 False = bot token (appears as the bot app). None = client default.
 
         Returns:
-            Message data with ts
+            Message data with `ts` — plus `ts_all`/`split_into` when split.
         """
-        data = {"channel": channel}
-        if text:
-            data["text"] = text
-        if blocks:
-            data["blocks"] = blocks
-        if thread_ts:
-            data["thread_ts"] = thread_ts
+        if blocks or not text or len(text) <= _MAX_TEXT_LEN:
+            data = {"channel": channel}
+            if text:
+                data["text"] = _escape_false_emoji_shortcodes(text)
+            if blocks:
+                data["blocks"] = blocks
+            if thread_ts:
+                data["thread_ts"] = thread_ts
+            return self._request("POST", "chat.postMessage", as_user=as_user, json=data)
 
-        return self._request("POST", "chat.postMessage", as_user=as_user, json=data)
+        parts = _chunk_text(text)
+        anchor = thread_ts
+        ts_all: List[str] = []
+        first_resp: Dict[str, Any] = {}
+        for i, part in enumerate(parts):
+            reply_to = anchor or (ts_all[0] if ts_all else None)
+            data = {"channel": channel, "text": _escape_false_emoji_shortcodes(part)}
+            if reply_to:
+                data["thread_ts"] = reply_to
+            resp = self._request("POST", "chat.postMessage", as_user=as_user, json=data)
+            ts_all.append(resp.get("ts"))
+            if i == 0:
+                first_resp = resp
+        result = dict(first_resp)
+        result["ts_all"] = ts_all
+        result["split_into"] = len(parts)
+        return result
 
     def delete_message(
         self,

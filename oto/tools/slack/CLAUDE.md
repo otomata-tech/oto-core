@@ -48,6 +48,29 @@ Erreur si aucun token résolu : `No Slack token for workspace '<slug>'…` → p
 Poser `SLACK_<NOUVEAU_SLUG>_BOT_TOKEN` (et `_USER_TOKEN` si post-as-user voulu) dans le
 vault, puis instancier `SlackClient(workspace="<nouveau_slug>")`. Aucune autre config.
 
+### `post_message` — texte prétraité par `text.py` (oto-backend#711)
+
+Le texte de `post_message` passe par deux gardes AVANT de partir, dans
+`oto/tools/slack/text.py` (module frère, pur, sans I/O — `client.py` dépasse
+déjà 500 lignes) :
+
+- **échappement des faux emoji** : Slack lit tout `:jeton:` purement
+  numérique comme un shortcode, même inconnu (signal #575 : une heure
+  `"20:51:"` suivie d'un `:` de ponctuation se lit `:51:`, avalant les
+  chiffres). `escape_false_emoji_shortcodes` casse ces jetons avec une
+  espace de largeur nulle (invisible), sauf les deux exceptions réelles du
+  jeu par défaut (`:100:`, `:1234:`) ;
+- **split au-delà de 4 000 caractères** (limite RECOMMANDÉE par Slack —
+  au-delà, Slack ne refuse rien, il TRONQUE en silence à 40 000). Signal
+  #613 : un digest de ~4 058 caractères posté en un seul appel a produit
+  deux messages Slack et le tool n'exposait qu'un seul `ts`. `post_message`
+  découpe désormais lui-même (`chunk_text`, coupe sur un mot/retour à la
+  ligne), poste chaque partie, et rend `ts_all` (tous les `ts`, dans l'ordre)
+  en plus de `ts` (toujours le PREMIER — l'ancre à réutiliser pour répondre
+  dans le même fil). Sans `thread_ts` fourni, les parties suivantes
+  threadent sous la première ; avec un `thread_ts` fourni, toutes les
+  parties y restent rattachées.
+
 ## 2. Gotcha — `find_user_by_email` dépend de l'email **réel** du compte Slack
 
 `slack_find_user_by_email` / `oto slack find-user` appelle `users.lookupByEmail` : l'email
