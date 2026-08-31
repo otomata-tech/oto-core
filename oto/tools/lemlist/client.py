@@ -28,8 +28,12 @@ class Campaign:
 
     `senders` is kept first-class because it is what an operator asks for
     ("qui envoie cette campagne ?"), but the v2 sample payload of
-    `GET /campaigns` does NOT advertise it — on that shape it lands `[]`.
-    ⚠️ Not replayed live; confirm with a real key before relying on it.
+    `GET /campaigns` does NOT advertise it — on that shape it would land `[]`.
+
+    ⚠️ Rejoué en live le 2026-08-31 SANS TRANCHER : toutes les campagnes du
+    compte de test avaient zéro expéditeur, donc un `senders` vide ne dit pas si
+    le champ est absent de la charge ou simplement vide. La question reste
+    ouverte, et se règle en une lecture sur une campagne qui a un expéditeur.
     """
     id: str
     name: str
