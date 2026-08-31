@@ -232,3 +232,329 @@ def test_requests_carry_a_timeout(monkeypatch):
     c.enrich(email="a@acme.fr", find_phone=True)
 
     assert captured["timeout"] == lm._HTTP_TIMEOUT
+
+
+# --- Campaign management -----------------------------------------------------
+#
+# Same bench as above (mocking `requests.request`): what is asserted is the
+# OUTGOING call — verb, path, and which of body/query each parameter lands in —
+# because that is what the lemlist contract fixes and what a silent mismatch
+# breaks. Not replayed against a live key.
+
+
+def test_list_campaigns_asks_for_v2_and_passes_filters(monkeypatch):
+    captured = _capture(monkeypatch, body=[
+        {"_id": "cam_1", "name": "Q3", "status": "running", "emoji": "🚀",
+         "hasError": True, "errors": ["no sender"], "createdAt": "2026-01-01"},
+    ])
+    c = lm.LemlistClient(api_key="k")
+    out = c.list_campaigns(limit=50, offset=100, status="running", sort_order="desc")
+
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith("/campaigns")
+    # `version=v2` is not optional decoration: the v1 shape is what comes back
+    # without it.
+    assert captured["params"]["version"] == "v2"
+    assert captured["params"]["limit"] == 50
+    assert captured["params"]["offset"] == 100
+    assert captured["params"]["status"] == "running"
+    assert captured["params"] == {
+        "version": "v2", "limit": 50, "offset": 100, "status": "running",
+        "sortBy": "createdAt", "sortOrder": "desc",
+    }
+    assert out[0].has_error is True
+    assert out[0].errors == ["no sender"]
+    assert out[0].created_at == "2026-01-01"
+
+
+def test_list_campaigns_refuses_an_unknown_status(monkeypatch):
+    _capture(monkeypatch, body=[])
+    c = lm.LemlistClient(api_key="k")
+    with pytest.raises(ValueError, match="status must be one of"):
+        c.list_campaigns(status="finished")
+
+
+def test_list_all_campaigns_reports_truncation_rather_than_hiding_it(monkeypatch):
+    """A capped list that looks complete is the failure mode worth a test."""
+    pages = []
+
+    def fake_request(method, url, headers=None, **kwargs):
+        pages.append(kwargs["params"]["offset"])
+        # Always a FULL page → the walk can only end on the page cap.
+        return _Resp(200, [{"_id": f"cam_{i}"} for i in range(100)])
+
+    monkeypatch.setattr(lm.requests, "request", fake_request)
+    c = lm.LemlistClient(api_key="k")
+    campaigns, truncated = c.list_all_campaigns(max_pages=3)
+
+    assert truncated is True
+    assert len(campaigns) == 300
+    assert pages == [0, 100, 200]
+
+
+def test_list_all_campaigns_stops_on_a_short_page(monkeypatch):
+    calls = {"n": 0}
+
+    def fake_request(method, url, headers=None, **kwargs):
+        calls["n"] += 1
+        n = 100 if calls["n"] == 1 else 7
+        return _Resp(200, [{"_id": f"cam_{i}"} for i in range(n)])
+
+    monkeypatch.setattr(lm.requests, "request", fake_request)
+    c = lm.LemlistClient(api_key="k")
+    campaigns, truncated = c.list_all_campaigns()
+
+    assert truncated is False
+    assert len(campaigns) == 107
+    assert calls["n"] == 2
+
+
+def test_status_says_when_its_count_is_only_a_floor(monkeypatch):
+    _capture(monkeypatch, body=[{"_id": f"cam_{i}"} for i in range(100)])
+    c = lm.LemlistClient(api_key="k")
+    assert c.status() == {
+        "connected": True, "campaigns_count": 100, "campaigns_capped": True,
+    }
+
+
+def test_create_campaign_sends_only_what_was_asked(monkeypatch):
+    captured = _capture(monkeypatch, body={"_id": "cam_1", "sequenceId": "seq_1"})
+    c = lm.LemlistClient(api_key="k")
+    c.create_campaign("Q3 outbound")
+
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/campaigns")
+    assert captured["json"] == {"name": "Q3 outbound"}
+
+
+def test_create_campaign_carries_timezone_and_auto_review(monkeypatch):
+    captured = _capture(monkeypatch, body={"_id": "cam_1"})
+    c = lm.LemlistClient(api_key="k")
+    c.create_campaign(
+        "Q3", timezone="America/New_York", auto_review=True,
+        auto_review_conditions=["deliverable"])
+
+    assert captured["json"] == {
+        "name": "Q3", "timezone": "America/New_York",
+        "autoReview": True, "autoReviewConditions": ["deliverable"],
+    }
+
+
+def test_auto_review_conditions_are_checked_locally(monkeypatch):
+    _capture(monkeypatch)
+    c = lm.LemlistClient(api_key="k")
+    with pytest.raises(ValueError, match="unknown autoReviewConditions"):
+        c.create_campaign("Q3", auto_review_conditions=["deliverable", "maybe"])
+    with pytest.raises(ValueError, match="unknown autoReviewConditions"):
+        c.update_campaign("cam_1", {"autoReviewConditions": ["nope"]})
+
+
+def test_start_and_pause_are_posts_on_their_own_paths(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.start_campaign("cam_1")
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/campaigns/cam_1/start")
+
+    c.pause_campaign("cam_1")
+    assert captured["url"].endswith("/campaigns/cam_1/pause")
+
+
+def test_duplicate_campaign_omits_the_name_when_not_given(monkeypatch):
+    captured = _capture(monkeypatch, body={"_id": "cam_2"})
+    c = lm.LemlistClient(api_key="k")
+
+    c.duplicate_campaign("cam_1")
+    assert captured["url"].endswith("/campaigns/cam_1/duplicate")
+    assert captured["json"] == {}
+
+    c.duplicate_campaign("cam_1", name="Q4 outbound")
+    assert captured["json"] == {"name": "Q4 outbound"}
+
+
+def test_statutes_is_a_get(monkeypatch):
+    captured = _capture(monkeypatch, body={"name": "Q3", "statutes": []})
+    c = lm.LemlistClient(api_key="k")
+    c.get_campaign_statutes("cam_1")
+
+    assert captured["method"] == "GET"
+    assert captured["url"].endswith("/campaigns/cam_1/statutes")
+
+
+# --- Sequence steps & A/B ----------------------------------------------------
+
+
+def test_add_step_refuses_a_type_outside_the_vocabulary(monkeypatch):
+    _capture(monkeypatch)
+    c = lm.LemlistClient(api_key="k")
+    with pytest.raises(ValueError, match="unknown step type"):
+        c.add_step("seq_1", {"type": "carrierPigeon"})
+    with pytest.raises(ValueError, match="needs a 'type'"):
+        c.add_step("seq_1", {"subject": "hi"})
+    with pytest.raises(ValueError, match="unknown conditionKey"):
+        c.add_step("seq_1", {"type": "conditional", "conditionKey": "hasVibes"})
+
+
+def test_add_step_posts_the_step_verbatim(monkeypatch):
+    captured = _capture(monkeypatch, body={"_id": "stp_1"})
+    c = lm.LemlistClient(api_key="k")
+    step = {"type": "email", "subject": "hi {{firstName}}", "message": "…", "delay": 2}
+    c.add_step("seq_1", step)
+
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/sequences/seq_1/steps")
+    assert captured["json"] == step
+
+
+def test_delete_step_is_a_delete_on_the_step_path(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+    c.delete_step("seq_1", "stp_1")
+
+    assert captured["method"] == "DELETE"
+    assert captured["url"].endswith("/sequences/seq_1/steps/stp_1")
+
+
+def test_ab_variant_verbs_share_one_path(monkeypatch):
+    captured = _capture(monkeypatch, body={"stepId": "stp_1"})
+    c = lm.LemlistClient(api_key="k")
+    path = "/sequences/seq_1/steps/stp_1/ab-test"
+
+    c.create_ab_variant("seq_1", "stp_1")
+    assert (captured["method"], captured["url"].endswith(path)) == ("POST", True)
+
+    c.get_ab_variant("seq_1", "stp_1")
+    assert captured["method"] == "GET"
+
+    c.update_ab_variant("seq_1", "stp_1", {"subject": "v2"})
+    assert captured["method"] == "PATCH"
+    assert captured["json"] == {"subject": "v2"}
+
+
+def test_delete_ab_variant_puts_the_variant_in_the_QUERY(monkeypatch):
+    """Body vs query is the whole contract here — a `json=` variant is ignored."""
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+
+    c.delete_ab_variant("seq_1", "stp_1")
+    assert captured["method"] == "DELETE"
+    assert captured["params"] == {"variant": "B"}
+    assert "json" not in captured
+
+    c.delete_ab_variant("seq_1", "stp_1", variant="A")
+    assert captured["params"] == {"variant": "A"}
+
+    with pytest.raises(ValueError, match="variant must be"):
+        c.delete_ab_variant("seq_1", "stp_1", variant="C")
+
+
+def test_select_ab_winner_puts_the_variant_in_the_BODY(monkeypatch):
+    captured = _capture(monkeypatch, body={"ok": True})
+    c = lm.LemlistClient(api_key="k")
+    c.select_ab_winner("seq_1", "stp_1", "B")
+
+    assert captured["url"].endswith("/sequences/seq_1/steps/stp_1/ab-test/winner")
+    assert captured["json"] == {"variant": "B"}
+
+
+# --- Schedules ---------------------------------------------------------------
+
+
+def test_create_schedule_fills_every_required_field(monkeypatch):
+    captured = _capture(monkeypatch, body={"_id": "skd_1"})
+    c = lm.LemlistClient(api_key="k")
+    c.create_schedule("Matinées")
+
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/schedules")
+    assert captured["json"] == {
+        "name": "Matinées", "timezone": "Europe/Paris",
+        "start": "09:00", "end": "18:00", "weekdays": [1, 2, 3, 4, 5],
+    }
+
+
+def test_schedule_rejects_a_malformed_window(monkeypatch):
+    _capture(monkeypatch)
+    c = lm.LemlistClient(api_key="k")
+    with pytest.raises(ValueError, match="start must be HH:mm"):
+        c.create_schedule("x", start="9am")
+    with pytest.raises(ValueError, match="end must be HH:mm"):
+        c.create_schedule("x", end="25:00")
+    with pytest.raises(ValueError, match="weekdays must be ints"):
+        c.create_schedule("x", weekdays=[0, 1])
+    with pytest.raises(ValueError, match="IANA"):
+        c.create_schedule("x", timezone="CET+1")
+    # The same checks apply on the PATCH path, on the keys actually sent.
+    with pytest.raises(ValueError, match="start must be HH:mm"):
+        c.update_schedule("skd_1", {"start": "nine"})
+
+
+def test_campaign_schedules_keeps_the_documented_trailing_slash(monkeypatch):
+    captured = _capture(monkeypatch, body=[])
+    c = lm.LemlistClient(api_key="k")
+    c.get_campaign_schedules("cam_1")
+
+    assert captured["url"].endswith("/campaigns/cam_1/schedules/")
+
+    c.associate_schedule("cam_1", "skd_1")
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/campaigns/cam_1/schedules/skd_1")
+
+
+# --- Stats -------------------------------------------------------------------
+
+
+def test_stats_v2_goes_through_the_v2_prefix(monkeypatch):
+    captured = _capture(monkeypatch, body={"nbLeads": 12})
+    c = lm.LemlistClient(api_key="k")
+    c.get_campaign_stats_v2(
+        "cam_1", start_date="2026-01-01T00:00:00.000Z",
+        end_date="2026-02-01T00:00:00.000Z", channels=["email", "linkedin"])
+
+    assert captured["url"].endswith("/api/v2/campaigns/cam_1/stats")
+    assert captured["params"]["startDate"] == "2026-01-01T00:00:00.000Z"
+    # Query side: a JSON array STRING, not repeated keys.
+    assert captured["params"]["channels"] == '["email", "linkedin"]'
+
+
+def test_batch_stats_sends_channels_as_a_real_array(monkeypatch):
+    """Same vocabulary, two encodings — this is the one that is easy to get wrong."""
+    captured = _capture(monkeypatch, body={"results": []})
+    c = lm.LemlistClient(api_key="k")
+    c.get_batch_campaign_stats(
+        ["cam_1", "cam_2"], start_date="a", end_date="b", channels=["email"])
+
+    assert captured["method"] == "POST"
+    assert captured["url"].endswith("/api/v2/campaigns/stats/batch")
+    assert captured["json"]["channels"] == ["email"]
+    assert captured["json"]["campaignIds"] == ["cam_1", "cam_2"]
+
+
+def test_stats_reject_bad_channels_ab_and_send_user(monkeypatch):
+    _capture(monkeypatch, body={})
+    c = lm.LemlistClient(api_key="k")
+    with pytest.raises(ValueError, match="unknown channels"):
+        c.get_campaign_stats_v2("cam_1", start_date="a", end_date="b",
+                                channels=["carrier-pigeon"])
+    with pytest.raises(ValueError, match="ab_selected must be"):
+        c.get_campaign_stats_v2("cam_1", start_date="a", end_date="b", ab_selected="C")
+    with pytest.raises(ValueError, match="both halves"):
+        c.get_campaign_stats_v2("cam_1", start_date="a", end_date="b",
+                                send_user="usr_1")
+    with pytest.raises(ValueError, match="at most 100"):
+        c.get_batch_campaign_stats([f"cam_{i}" for i in range(101)],
+                                   start_date="a", end_date="b")
+    with pytest.raises(ValueError, match="nothing to fetch"):
+        c.get_batch_campaign_stats([], start_date="a", end_date="b")
+
+
+def test_reports_join_the_ids_into_one_query_parameter(monkeypatch):
+    captured = _capture(monkeypatch, body=[])
+    c = lm.LemlistClient(api_key="k")
+    c.get_campaign_reports(["cam_1", "cam_2"])
+
+    assert captured["url"].endswith("/campaigns/reports")
+    assert captured["params"] == {"campaignIds": "cam_1,cam_2"}
+    with pytest.raises(ValueError, match="nothing to report on"):
+        c.get_campaign_reports([])
