@@ -59,6 +59,11 @@ def test_explicit_timeout_not_overridden(monkeypatch):
 # `kaspr_enrich_linkedin` la donnait en EXEMPLE depuis la création du tool
 # (2026-05-22). Le refus vit ici et pas dans le backend parce que c'est la logique
 # canonique du client — la CLI en profite aussi.
+#
+# La liste de référence est l'enum de l'OpenAPI de Kaspr, pas notre docstring : c'est
+# une docstring non vérifiée qui a produit l'incident, et `personalEmail` — qu'elle
+# annonçait — n'est PAS dans cet enum. Il reste toléré, faute de mesure ; le test le
+# dit à voix haute plutôt que de le laisser passer pour un fait établi.
 
 
 def _sans_reseau(monkeypatch):
@@ -89,6 +94,31 @@ def test_un_seul_champ_inconnu_suffit_a_refuser(monkeypatch):
     with pytest.raises(ValueError):
         km.KasprClient(api_key="k").enrich_linkedin(
             "jane-doe", data_to_get=["workEmail", "company"])
+
+
+def test_personalEmail_est_tolere_faute_de_mesure(monkeypatch):
+    """Non documenté par Kaspr (son enum dit `directEmail`), jamais mesuré chez
+    nous, et de la même famille que le défaut corrigé ici — `personalEmails` est un
+    champ de la RÉPONSE. On ne le refuse pas pour autant : refuser sur une
+    supposition casserait un appelant dont l'appel marche peut-être. Si la sonde
+    sentinelle rend 500, ce test change de camp."""
+    captured = {}
+
+    def fake_request(method, url, headers=None, **kwargs):
+        captured.update(**kwargs)
+        return _Resp()
+
+    monkeypatch.setattr(km.requests, "request", fake_request)
+    km.KasprClient(api_key="k").enrich_linkedin(
+        "jane-doe", data_to_get=["personalEmail"])
+    assert captured["json"]["dataToGet"] == ["personalEmail"]
+
+
+def test_le_refus_nomme_lenum_du_fournisseur_pas_le_tolere():
+    """Le message oriente vers ce que Kaspr DOCUMENTE — un appelant qui le lit ne
+    doit pas repartir avec un nom que le fournisseur ne publie pas."""
+    assert "personalEmail" not in ", ".join(km.DATA_TO_GET)
+    assert km.DATA_TO_GET == ("workEmail", "directEmail", "phone")
 
 
 def test_les_noms_acceptes_passent(monkeypatch):

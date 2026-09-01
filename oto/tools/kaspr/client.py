@@ -15,21 +15,38 @@ from ...config import require_secret
 # (vérifié live : `alexislaporte` → 200, `https://.../in/alexislaporte/` → 500).
 _LINKEDIN_IN = re.compile(r"/in/([^/?#]+)", re.IGNORECASE)
 
-# Les SEULS noms que Kaspr accepte dans `dataToGet` (API v2.0). Un nom inconnu ne
-# rend pas un 400 lisible : le parser amont plante et l'appelant reçoit un **500**
-# (`TypeError: Cannot read properties of undefined (reading 'push')`) — c'est-à-dire
-# une panne, là où il a une faute de frappe. Reproduit le 2026-09-01 sur un profil
-# sentinelle, sans consommer de crédit :
+# Les noms que Kaspr accepte dans `dataToGet` — l'enum de SON OpenAPI (`info.version`
+# 2.0, `items.enum` du corps de `POST /profile/linkedin`), pas notre souvenir.
+# Un nom hors enum ne rend pas un 400 lisible : le parser amont plante et l'appelant
+# reçoit un **500** (`TypeError: Cannot read properties of undefined (reading
+# 'push')`) — c'est-à-dire une panne, là où il a une faute de frappe. Reproduit le
+# 2026-09-01 sur un profil sentinelle, sans consommer de crédit :
 #   ["emails", "phones", "company"] → 500 ;  ["workEmail", "phone"] → 402 ;  [] → 200.
 #
-# Ces trois noms-là n'étaient pas un hasard : la docstring du tool MCP
-# `kaspr_enrich_linkedin` les donnait en EXEMPLE depuis la création du tool
-# (2026-05-22), et un agent qui lit le schéma applique ce qu'il y lit. D'où le refus
-# LOCAL ci-dessous, qui NOMME les noms acceptés : un premier essai corrigeable au
-# lieu d'une panne qu'on croit amont — et qu'on réessaie donc en boucle.
-DATA_TO_GET = ("workEmail", "personalEmail", "phone")
+# Ces trois noms-là n'étaient pas un hasard, et c'est la leçon du lot : `emails`,
+# `phones` et `company` sont des noms de champs de la RÉPONSE Kaspr (`personalEmails`,
+# `phones`, `company`) — repris comme s'ils étaient des valeurs d'ENTRÉE, puis figés
+# dans la docstring du tool MCP `kaspr_enrich_linkedin` dès sa création (2026-05-22).
+# Un agent qui lit le schéma applique ce qu'il y lit. D'où le refus LOCAL ci-dessous,
+# qui NOMME les valeurs acceptées : un premier essai corrigeable au lieu d'une panne
+# qu'on croit amont — et qu'on réessaie donc en boucle.
+DATA_TO_GET = ("workEmail", "directEmail", "phone")
 
-# Ce que Kaspr reçoit quand l'appelant ne demande rien : PAS « tous les champs ».
+# ⚠️ `personalEmail` est TOLÉRÉ, pas documenté : il ne figure pas dans l'enum de Kaspr,
+# où le mail personnel s'appelle `directEmail`. Il traîne dans nos docstrings depuis la
+# création du client et n'a JAMAIS été mesuré — il a donc exactement la forme du défaut
+# qu'on corrige ici (`personalEmails` est, lui, un champ de la réponse). On l'accepte
+# quand même : le refuser casserait un appelant qui l'utilise peut-être avec succès, et
+# ce lot n'a pas à trancher par supposition ce qu'une sonde d'une seconde trancherait.
+# À mesurer sur l'id sentinelle (500 ⇒ le retirer d'ici et le traiter comme `emails`).
+DATA_TO_GET_TOLERES = ("personalEmail",)
+
+_ACCEPTES = DATA_TO_GET + DATA_TO_GET_TOLERES
+
+# Ce que Kaspr reçoit quand l'appelant de CE client ne demande rien. ⚠️ Ce n'est pas
+# le défaut de l'API : omis, Kaspr sélectionne « all allowed fields ». Mais le client
+# ne l'omet jamais — il substitue la liste ci-dessous. « Defaults to all » était donc
+# faux ici, quoi qu'en dise la doc du fournisseur.
 DATA_TO_GET_DEFAUT = ["workEmail", "phone"]
 
 
@@ -117,9 +134,10 @@ class KasprClient:
                 is extracted automatically (a full URL makes Kaspr 500).
             name: Full name (helps matching)
             is_phone_required: Require phone number
-            data_to_get: field names to retrieve — only `DATA_TO_GET` values are
-                accepted ("workEmail", "personalEmail", "phone"); anything else is
-                refused HERE, because Kaspr answers 500 on an unknown name.
+            data_to_get: field names to retrieve — Kaspr's own enum, i.e.
+                `DATA_TO_GET` ("workEmail", "directEmail", "phone"), plus the
+                tolerated `DATA_TO_GET_TOLERES`. Anything else is refused HERE,
+                because Kaspr answers 500 on a name it does not know.
                 Omitted → `DATA_TO_GET_DEFAUT` (NOT every field).
 
         Returns:
@@ -129,7 +147,7 @@ class KasprClient:
             ValueError: `data_to_get` carries a name Kaspr does not know.
         """
         if data_to_get is not None:
-            inconnus = [str(d) for d in data_to_get if d not in DATA_TO_GET]
+            inconnus = [str(d) for d in data_to_get if d not in _ACCEPTES]
             if inconnus:
                 raise ValueError(
                     "Kaspr n'accepte dans `dataToGet` que "
