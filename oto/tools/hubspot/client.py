@@ -9,13 +9,29 @@ Surface générique sur les objets CRM : `contacts`, `companies`, `deals`,
 (`list/get/search/create/update/delete` + associations). Les notes/engagements
 ont un helper dédié car ils s'attachent à un objet via une association.
 
+Deux propriétés de ce client valent d'être sues avant de l'appeler :
+
+- **Le 429 se rattrape, borné ; rien d'autre ne se rattrape.** Une private app a
+  droit à 190 requêtes / 10 s, et une phase de synchro CRM en fait ~4 par lead :
+  ~40 leads suffisent à taper le plafond. Un 429 dit que la requête a été REFUSÉE
+  (rien n'a été fait), donc la rejouer est sans effet de bord ; un 5xx ne dit pas
+  si l'écriture est passée, et le rejouer créerait un doublon dans un CRM. Cf.
+  `_request`.
+- **`batch_read_objects` est STRICT sur les noms de propriétés**, contrairement au
+  GET unitaire : une propriété absente du portail fait un 400
+  `PROPERTY_DOESNT_EXIST` sur la tranche ENTIÈRE, elle ne revient pas vide. C'est
+  le piège que l'appelant hérite en passant de N lectures unitaires à une lecture
+  groupée.
+
 Docs : https://developers.hubspot.com/docs/api/crm/understanding-the-crm
 
 Requires: requests
 """
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+import logging
+import time
+from typing import Any, Dict, Iterable, List, Optional
 
 import requests
 
@@ -30,6 +46,31 @@ _NOTE_ASSOCIATION_TYPE = {
     "deals": 214,
     "tickets": 216,
 }
+
+logger = logging.getLogger(__name__)
+
+# HubSpot plafonne TOUT endpoint `batch/*` à 100 entrées par requête (« Object API
+# batch endpoints are limited to 100 inputs per request »). Une page d'appartenances
+# de liste en vaut 250 : découper est la seule façon de la servir.
+BATCH_READ_MAX = 100
+
+# Débit d'une private app : 190 requêtes / 10 s. Une phase de synchro CRM fait ~4
+# appels par lead, donc ~40 leads suffisent à taper le plafond — et un 429 non
+# rattrapé arrête le run AU MILIEU d'un enregistrement à moitié écrit.
+# La reprise est BORNÉE EN DURÉE, pas seulement en nombre de tentatives : le
+# handler tourne dans le threadpool du serveur MCP, qui borne la CONCURRENCE et pas
+# le temps (oto-backend `docs/event-loop-perf.md`). Pire cas écrit ici :
+# RATE_LIMIT_ATTEMPTS appels HTTP et RATE_LIMIT_MAX_TOTAL_SLEEP secondes d'attente
+# cumulée — relever le nombre de tentatives ne peut donc pas rallonger le pire cas.
+RATE_LIMIT_ATTEMPTS = 3            # >= 1 ; 1 = pas de reprise
+RATE_LIMIT_MAX_SLEEP = 10.0        # plafond d'UNE attente
+RATE_LIMIT_MAX_TOTAL_SLEEP = 20.0  # plafond du CUMUL — la borne de durée
+
+# Un 429 ne dit pas toujours « réessaie ». HubSpot nomme la politique franchie dans
+# le corps (`policyName`) : les fenêtres courtes se rattrapent, un quota JOURNALIER
+# ou MENSUEL ne se rattrape pas — attendre puis rejouer immobilise un worker pour
+# rien, et le refus arrivera de toute façon.
+_RATE_LIMIT_POLICY_NOT_RETRYABLE = frozenset({"DAILY", "MONTHLY"})
 
 
 class HubSpotClient:
@@ -51,10 +92,75 @@ class HubSpotClient:
         })
 
     def _request(self, method: str, path: str, **kwargs) -> Any:
+        """Un appel HubSpot, avec la seule reprise qui soit sûre : le 429.
+
+        ⚠️ **Le 429 est réessayé, les 5xx non.** Un 429 dit que la requête a été
+        REFUSÉE — rien n'a été fait, la rejouer est sans effet de bord, quel que
+        soit le verbe. Un 502/504 ne dit pas si l'écriture est passée : rejouer un
+        POST dessus créerait un doublon, et un doublon dans un CRM coûte plus cher
+        que l'erreur qu'on voulait éviter. La différence est le tout du sujet.
+
+        À bout de tentatives (ou de budget d'attente) on ne rend RIEN de dégradé :
+        `raise_for_upstream` lève l'`UpstreamHTTPError(429)` du dernier essai,
+        `status_code` compris — un refus nommé, que l'appelant peut router.
+        """
         url = f"{self.BASE_URL}{path}"
-        resp = self.session.request(method, url, timeout=30, **kwargs)
+        budget = RATE_LIMIT_MAX_TOTAL_SLEEP
+        attempt = 0
+        while True:
+            attempt += 1
+            resp = self.session.request(method, url, timeout=30, **kwargs)
+            if resp.status_code != 429 or attempt >= RATE_LIMIT_ATTEMPTS:
+                break
+            if not self._rate_limit_is_retryable(resp):
+                break              # quota journalier : attendre n'y change rien
+            delay = min(self._retry_delay(resp, attempt), budget)
+            if delay <= 0:
+                break              # budget de durée épuisé : on refuse, on ne dort pas
+            logger.info(
+                "hubspot 429 sur %s %s — nouvelle tentative dans %.1f s (%d/%d)",
+                method, path, delay, attempt, RATE_LIMIT_ATTEMPTS)
+            time.sleep(delay)
+            budget -= delay
+        if resp.status_code == 429:
+            logger.warning(
+                "hubspot 429 non rattrapé après %d tentative(s) sur %s %s",
+                attempt, method, path)
         raise_for_upstream(resp, service="hubspot")
         return resp.json() if resp.content else {}
+
+    @staticmethod
+    def _rate_limit_is_retryable(resp: Any) -> bool:
+        """Un 429 se rattrape-t-il ?
+
+        HubSpot nomme la politique franchie dans le corps (`policyName` : SECONDLY
+        | TEN_SECONDLY_ROLLING | DAILY…). Politique inconnue ou corps illisible ⇒
+        on RÉESSAIE : le cas fréquent est la rafale.
+        """
+        try:
+            body = resp.json()
+        # noqa: SILENT — corps non-JSON : le défaut « rafale » ci-dessous
+        except Exception:
+            return True
+        policy = body.get("policyName") if isinstance(body, dict) else None
+        return str(policy or "").upper() not in _RATE_LIMIT_POLICY_NOT_RETRYABLE
+
+    @staticmethod
+    def _retry_delay(resp: Any, attempt: int) -> float:
+        """Combien attendre après un 429 : `Retry-After` s'il est là (l'amont sait
+        mieux que nous), sinon un palier exponentiel.
+
+        HubSpot ne garantit pas l'en-tête, donc le repli est ÉCRIT plutôt que
+        deviné — et il est plafonné, parce qu'une attente non bornée dans un
+        handler est un gel sous un autre nom. `Retry-After` peut aussi être une
+        date HTTP : non parsable ⇒ palier.
+        """
+        raw = (getattr(resp, "headers", None) or {}).get("Retry-After")
+        try:
+            delay = float(raw) if raw else float(2 ** attempt)
+        except (TypeError, ValueError):
+            delay = float(2 ** attempt)
+        return min(max(delay, 0.0), RATE_LIMIT_MAX_SLEEP)
 
     # --- Objets CRM (génériques) -------------------------------------------
 
@@ -153,6 +259,79 @@ class HubSpotClient:
         """Archive un objet (corbeille HubSpot)."""
         return self._request("DELETE", f"/crm/v3/objects/{object_type}/{object_id}")
 
+    def batch_read_objects(
+        self,
+        object_type: str,
+        ids: Iterable[Any],
+        properties: Optional[List[str]] = None,
+        id_property: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Lit N objets en un appel par tranche de 100, au lieu de N appels.
+
+        Rend `{"results": [...], "missing_ids": [...]}`.
+
+        ⚠️ `missing_ids` est un DIFF LOCAL (ce qu'on a demandé moins ce qui est
+        revenu), pas une lecture du corps d'erreur : un id supprimé, archivé ou
+        d'un autre portail est simplement ABSENT des `results` et HubSpot répond
+        207 — donc `raise_for_upstream` ne lève pas. Sans ce relevé, une page de
+        250 membres reviendrait à 247 lignes sans que personne ne l'apprenne :
+        c'est le « succès déguisé » que la maison refuse.
+
+        ⚠️ Une tranche qui échoue LÈVE : jamais une demi-page qui passerait pour la
+        liste entière.
+
+        Args:
+            object_type: contacts | companies | deals | tickets | objet custom.
+            ids: les ids (ou, avec `id_property`, les valeurs de cette propriété).
+                Dédupliqués en gardant l'ordre d'entrée ; les vides sont écartés.
+            properties: noms INTERNES des propriétés à rendre. ⚠️ `batch/read` est
+                STRICT là-dessus, contrairement au GET unitaire : une propriété
+                absente du portail fait un 400 `PROPERTY_DOESNT_EXIST` sur la
+                tranche entière, elle ne revient pas vide.
+            id_property: lire par clé d'unicité (`email`…) au lieu du record id.
+                Elle est alors AJOUTÉE aux `properties` demandées si elle n'y est
+                pas — sans elle dans la réponse, `missing_ids` serait incalculable
+                (les `results` sont keyés sur le record id, pas sur la clé). La
+                comparaison est exacte d'abord, puis insensible à la casse :
+                HubSpot normalise certaines clés (un email revient en minuscules),
+                et signaler ces lignes en `missing_ids` serait un faux.
+        """
+        wanted: List[str] = list(dict.fromkeys(
+            str(i) for i in ids if i is not None and str(i) != ""))
+        if not wanted:
+            # Aucun id : pas d'appel du tout. HubSpot refuserait un `inputs` vide,
+            # et « rien à lire » n'est pas une erreur.
+            return {"results": [], "missing_ids": []}
+
+        props = list(properties or [])
+        if id_property and id_property not in props:
+            props.append(id_property)
+
+        out: List[Dict[str, Any]] = []
+        for start in range(0, len(wanted), BATCH_READ_MAX):
+            body: Dict[str, Any] = {
+                "inputs": [{"id": i} for i in wanted[start:start + BATCH_READ_MAX]],
+            }
+            if props:
+                body["properties"] = props
+            if id_property:
+                body["idProperty"] = id_property
+            page = self._request(
+                "POST", f"/crm/v3/objects/{object_type}/batch/read", json=body)
+            out.extend((page or {}).get("results") or [])
+
+        seen = set()
+        for record in out:
+            if id_property:
+                value = (record.get("properties") or {}).get(id_property)
+            else:
+                value = record.get("id")
+            if value is not None:
+                seen.add(str(value))
+        folded = {v.casefold() for v in seen}
+        missing = [i for i in wanted if i not in seen and i.casefold() not in folded]
+        return {"results": out, "missing_ids": missing}
+
     # --- Associations -------------------------------------------------------
 
     def list_associations(
@@ -202,7 +381,6 @@ class HubSpotClient:
             object_id: id de l'objet auquel rattacher la note.
             timestamp: ISO 8601 ou epoch ms (défaut = maintenant côté HubSpot).
         """
-        import time
         props: Dict[str, Any] = {
             "hs_note_body": body,
             "hs_timestamp": timestamp or str(int(time.time() * 1000)),
