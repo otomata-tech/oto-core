@@ -6,8 +6,9 @@ import hashlib
 import logging
 import os
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 import requests
 
 from ....config import get_cache_dir
@@ -185,6 +186,89 @@ class NotionClient:
             data["filter"] = {"value": filter_type, "property": "object"}
 
         return self._request('POST', 'search', data=data, use_cache=True)
+
+    def search_edited_on(
+        self,
+        date: str,
+        filter_type: Optional[str] = None,
+        query: str = "",
+        max_pages: int = 50,
+    ) -> List[Dict]:
+        """List pages/databases last edited on a given calendar day (UTC).
+
+        Signal oto-core#69 (feedback plateforme #468/#469, 16/08) : Notion's
+        `POST /search` can only ever FILTER on object type — the only
+        server-side lever for a date-bounded read is `sort` on
+        `last_edited_time` (confirmed against the API reference: `search`
+        takes no timestamp filter, unlike a database query's `filter.
+        timestamp`). Without it, a run that wants "what changed today" has to
+        fetch everything and throw most of it away, and "nothing changed"
+        becomes an INFERENCE (diff each candidate against what's already
+        known) instead of a computed answer — the exact cost the signal
+        reports for a daily ingestion run reading Notion four days running.
+
+        This walks `search` sorted descending by `last_edited_time` and
+        stops at the first result older than `date`: everything after it is
+        older still, by construction of the sort. Cost tracks the number of
+        objects edited since `date`, never workspace size.
+
+        Args:
+            date: calendar day, UTC, "YYYY-MM-DD".
+            filter_type: "page" or "database" to restrict object type.
+            query: optional text query (default: every object shared with
+                the integration).
+            max_pages: safety bound on the number of `search` calls — raises
+                rather than silently returning a truncated answer.
+
+        Returns:
+            Page/database objects (raw Notion shape) whose `last_edited_time`
+            falls on `date`, most recent first.
+        """
+        try:
+            day_start = datetime.strptime(date, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        except ValueError as e:
+            raise ValueError(f"date invalide {date!r}, attendu 'YYYY-MM-DD' : {e}") from e
+        day_end = day_start + timedelta(days=1)
+
+        matches: List[Dict] = []
+        start_cursor: Optional[str] = None
+
+        for _ in range(max_pages):
+            data: Dict[str, Any] = {
+                "query": query,
+                "sort": {"direction": "descending", "timestamp": "last_edited_time"},
+                "page_size": 100,
+            }
+            if filter_type:
+                data["filter"] = {"value": filter_type, "property": "object"}
+            if start_cursor:
+                data["start_cursor"] = start_cursor
+
+            result = self._request('POST', 'search', data=data, use_cache=False)
+
+            exhausted = False
+            for obj in result.get('results', []):
+                edited = obj.get('last_edited_time')
+                if not edited:
+                    continue
+                edited_dt = datetime.fromisoformat(edited.replace('Z', '+00:00'))
+                if edited_dt >= day_end:
+                    continue  # edited after the target day: keep descending
+                if edited_dt >= day_start:
+                    matches.append(obj)
+                else:
+                    exhausted = True
+                    break
+
+            if exhausted or not result.get('has_more'):
+                return matches
+            start_cursor = result.get('next_cursor')
+
+        raise Exception(
+            f"search_edited_on({date!r}): {max_pages} pages Notion parcourues "
+            f"sans atteindre le début de la fenêtre — augmenter max_pages ou "
+            f"vérifier la date."
+        )
 
     def get_page(self, page_id: str) -> Dict:
         """Get page metadata."""
