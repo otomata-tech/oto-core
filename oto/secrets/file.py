@@ -75,3 +75,14 @@ class FileProvider:
         if name in secrets:
             return secrets[name]
         return MISSING
+
+    def store_exists(self) -> bool:
+        """Neither a project- nor a user-scoped `secrets.env` exists on disk.
+
+        Deliberately NOT wired into `lookup`'s return value: this provider is
+        also the graceful fallback for sops/scaleway (`oto.config.get_secret`),
+        where "no file here either" must stay a quiet `MISSING`, not escalate.
+        It exists so the CONFIGURED-as-primary case (`secret_provider: file`)
+        can be diagnosed by `get_secret`'s one-time warning instead.
+        """
+        return _find_project_secrets() is not None or _user_secrets().exists()

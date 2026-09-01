@@ -104,6 +104,18 @@ def ambiguous_keys() -> Dict[str, List[str]]:
     return _ambiguous
 
 
+def _root_exists(file: Optional[str], dir_path: Optional[str]) -> bool:
+    """Whether the configured store (single file or root dir) is on disk.
+
+    Mirrors `fetch_secrets`'s own resolution — WITHOUT decrypting — so it can
+    be called cheaply on every `get_secret` to detect a missing store.
+    """
+    if file:
+        return Path(file).expanduser().exists()
+    root = Path(dir_path).expanduser() if dir_path else _autodetect_dir()
+    return root is not None and root.is_dir()
+
+
 def fetch_secrets(
     path: Optional[str] = None,
     dir_path: Optional[str] = None,
@@ -176,3 +188,6 @@ class SopsProvider:
                 f"(`sops -d <file>`) or pass it via the environment."
             )
         return MISSING
+
+    def store_exists(self) -> bool:
+        return _root_exists(self._file, self._dir)

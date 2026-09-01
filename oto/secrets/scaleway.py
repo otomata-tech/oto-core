@@ -140,3 +140,8 @@ class ScalewayProvider:
         if name in secrets:
             return secrets[name]
         return MISSING
+
+    def store_exists(self) -> bool:
+        """Cheap on-disk check only — no API call. `~/.config/scw/config.yaml`
+        absent is exactly what `_load_scw_credentials` would raise on."""
+        return _SCW_CONFIG.exists()

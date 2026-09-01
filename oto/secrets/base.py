@@ -37,3 +37,15 @@ class SecretProvider(Protocol):
     def lookup(self, name: str) -> object:
         """Return the value, or ``MISSING`` / ``STORE_ABSENT``."""
         ...
+
+    def store_exists(self) -> bool:
+        """Whether this provider's backing store exists at all, independent of
+        any single key.
+
+        Cheap and side-effect-free (no forced decrypt/network call) — used by
+        `oto.config.get_secret` to warn ONCE per process when the *configured*
+        provider has nothing to read (oto-core#63: a `file` provider pointed at
+        a renamed-away `secrets.env` resolved every secret to `default` without
+        a single message, indistinguishable from "all keys deliberately unset").
+        """
+        ...
