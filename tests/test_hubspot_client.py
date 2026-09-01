@@ -10,10 +10,14 @@ Les deux invariants que ce fichier existe pour verrouiller :
    archivé ou d'un autre portail est simplement absent des `results` et HubSpot
    répond 207 — donc rien ne lève. Sans `missing_ids`, une page de 250 membres
    reviendrait à 247 lignes sans que personne ne l'apprenne.
-2. **La reprise sur 429 est bornée EN DURÉE, et ne s'étend à rien d'autre.** Un
-   5xx n'est jamais rejoué (un POST dupliquerait un enregistrement CRM), un quota
-   journalier n'est jamais attendu, et le cumul des attentes reste sous plafond
-   même si quelqu'un relève le nombre de tentatives.
+2. **La reprise sur 429 est bornée EN DURÉE, et par OPÉRATION.** Un 5xx n'est
+   jamais rejoué (un POST dupliquerait un enregistrement CRM), un quota journalier
+   n'est jamais attendu, et le cumul des attentes reste sous `RATE_LIMIT_MAX_TOTAL_SLEEP`
+   pour l'opération ENTIÈRE — les trois tranches d'une lecture de 250 ids
+   comprises. Un budget local à `_request` aurait respecté la constante à la
+   lettre en dormant trois fois le plafond : c'est cette lecture-là que les deux
+   tests `..._spans_the_whole_batch_read...` et `..._out_of_sleep_budget...`
+   interdisent.
 """
 from __future__ import annotations
 
@@ -228,6 +232,91 @@ def test_a_429_without_a_policy_is_still_retried(http):
     _client().get_object("contacts", "1")
 
     assert len(http["calls"]) == 2
+
+
+# --- Le budget d'attente est celui de l'OPÉRATION, pas de l'appel HTTP -------
+
+def test_the_sleep_budget_spans_the_whole_batch_read_not_one_chunk(http):
+    """250 ids = 3 tranches. Un 429 par tranche, chacun demandant 8 s.
+
+    Si le budget vivait dans `_request`, il repartirait à neuf à chaque tranche et
+    on dormirait 8 + 8 + 8 = 24 s > RATE_LIMIT_MAX_TOTAL_SLEEP, tout en respectant
+    la constante à la lettre. Partagé, la 3ᵉ attente est rabotée à ce qui reste :
+    le plafond ÉCRIT est le plafond TENU, quel que soit le nombre d'ids.
+    """
+    ids = [str(i) for i in range(250)]
+    attente = _Resp(429, {"policyName": "TEN_SECONDLY_ROLLING"},
+                    {"Retry-After": "8"})
+    http["responses"] = [
+        attente, _Resp(200, {"results": [_record(i) for i in ids[0:100]]}),
+        attente, _Resp(200, {"results": [_record(i) for i in ids[100:200]]}),
+        attente, _Resp(200, {"results": [_record(i) for i in ids[200:250]]}),
+    ]
+    out = _client().batch_read_objects("contacts", ids)
+
+    assert http["sleeps"] == [8.0, 8.0, 4.0]          # 8 + 8 + 4 = le plafond
+    assert sum(http["sleeps"]) == hs.RATE_LIMIT_MAX_TOTAL_SLEEP
+    assert len(http["calls"]) == 6                    # 3 tranches × (429 + 200)
+    # ...et la lecture aboutit quand même : borner n'est pas dégrader.
+    assert [r["id"] for r in out["results"]] == ids
+    assert out["missing_ids"] == []
+
+
+def test_a_batch_read_out_of_sleep_budget_refuses_instead_of_sleeping_again(http):
+    """Budget épuisé par la 1ʳᵉ tranche ⇒ la 2ᵉ ne dort pas du tout : refus nommé.
+
+    C'est l'autre moitié de la borne. Une demi-page n'est jamais servie comme si
+    elle était la liste entière — la tranche qui échoue LÈVE.
+    """
+    ids = [str(i) for i in range(250)]
+    attente = _Resp(429, {"policyName": "TEN_SECONDLY_ROLLING"},
+                    {"Retry-After": "10"})
+    http["responses"] = [
+        attente, attente,
+        _Resp(200, {"results": [_record(i) for i in ids[0:100]]}),
+        attente,
+    ]
+    with pytest.raises(UpstreamHTTPError) as ei:
+        _client().batch_read_objects("contacts", ids)
+
+    assert http["sleeps"] == [10.0, 10.0]
+    assert sum(http["sleeps"]) <= hs.RATE_LIMIT_MAX_TOTAL_SLEEP
+    assert len(http["calls"]) == 4      # 3 sur la tranche 1, 1 sur la 2 : pas de 5ᵉ
+    assert ei.value.status_code == 429
+
+
+def test_one_request_still_gets_a_whole_budget_of_its_own(http):
+    """Le partage ne rétrécit pas un appel simple : sans `_budget`, budget neuf."""
+    http["responses"] = [_Resp(429, {}, {"Retry-After": "10"}), _Resp(200)]
+    _client().get_object("contacts", "1")
+    http["sleeps"].clear()
+    http["responses"] = [_Resp(429, {}, {"Retry-After": "10"}), _Resp(200)]
+    _client().get_object("contacts", "2")
+
+    assert http["sleeps"] == [10.0]     # le 2ᵉ appel n'hérite pas de la dette du 1ᵉʳ
+
+
+def test_a_retry_after_of_zero_replays_at_once_instead_of_giving_up(http):
+    """« Rejoue tout de suite » et « je n'ai plus de budget » sont DEUX états.
+
+    Les confondre coûtait la reprise à un serveur qui l'accordait : `Retry-After: 0`
+    tombait dans la branche « budget épuisé » et abandonnait.
+    """
+    http["responses"] = [_Resp(429, {}, {"Retry-After": "0"}), _Resp(200, {"id": "1"})]
+    out = _client().get_object("contacts", "1")
+
+    assert len(http["calls"]) == 2
+    assert http["sleeps"] == []        # on rejoue, on ne dort pas
+    assert out == {"id": "1"}
+
+
+def test_a_retry_after_already_expired_is_read_the_same_way(http):
+    """Une échéance passée (`-5`) dit « c'est bon », pas « renonce »."""
+    http["responses"] = [_Resp(429, {}, {"Retry-After": "-5"}), _Resp(200, {"id": "1"})]
+    _client().get_object("contacts", "1")
+
+    assert len(http["calls"]) == 2
+    assert http["sleeps"] == []
 
 
 # --- Aucun dégât collatéral sur les appels existants -------------------------
