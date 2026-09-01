@@ -196,13 +196,33 @@ def test_a_single_wait_is_capped(http):
     assert http["sleeps"] == [hs.RATE_LIMIT_MAX_SLEEP]
 
 
-def test_the_total_wait_is_bounded_not_just_the_attempt_count(http):
-    """Relever RATE_LIMIT_ATTEMPTS ne doit pas pouvoir rallonger un handler."""
+def test_the_total_wait_is_bounded_not_just_the_attempt_count(http, monkeypatch):
+    """Relever RATE_LIMIT_ATTEMPTS ne doit pas pouvoir rallonger un handler.
+
+    ⚠️ Ce test doit tourner AVEC UNE AUTRE VALEUR que celle livrée, sinon il ne
+    dit rien. À `RATE_LIMIT_ATTEMPTS = 3`, il ne reste que deux attentes, chacune
+    déjà rabotée à `RATE_LIMIT_MAX_SLEEP` (10 s) : leur somme vaut le plafond de
+    cumul (20 s) par coïncidence arithmétique, et l'assertion passait donc AUSSI
+    avec le plafond de cumul entièrement RETIRÉ du client. Elle contraignait la
+    valeur des constantes, pas le comportement.
+
+    On relève donc la constante que la phrase ci-dessus met en cause. À huit
+    tentatives et 10 s réclamées à chaque 429, un client borné seulement en
+    NOMBRE dormirait sept fois : 70 s dans un handler. Ce qui l'arrête ici au
+    bout de deux attentes n'est pas le compteur de tentatives — 8 n'est jamais
+    atteint, on ne fait que 3 appels — mais le budget de DURÉE, épuisé.
+    """
+    monkeypatch.setattr(hs, "RATE_LIMIT_ATTEMPTS", 8)
     http["responses"] = [_Resp(429, {}, {"Retry-After": "10"})]
-    with pytest.raises(UpstreamHTTPError):
+    with pytest.raises(UpstreamHTTPError) as ei:
         _client().get_object("contacts", "1")
 
-    assert sum(http["sleeps"]) <= hs.RATE_LIMIT_MAX_TOTAL_SLEEP
+    assert http["sleeps"] == [10.0, 10.0]
+    assert sum(http["sleeps"]) == hs.RATE_LIMIT_MAX_TOTAL_SLEEP
+    # 3 appels pour 8 tentatives autorisées : c'est la DURÉE qui a tranché, et le
+    # refus est nommé — pas une valeur dégradée rendue après une longue attente.
+    assert len(http["calls"]) == len(http["sleeps"]) + 1
+    assert ei.value.status_code == 429
 
 
 def test_an_exhausted_retry_is_a_named_refusal_not_a_none(http):
