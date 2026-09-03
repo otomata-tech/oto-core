@@ -73,30 +73,73 @@ class _MessagingMixin:
 
     def _annotate_chat_attendees(self, data: Any) -> None:
         """Enrichit in-place les fils d'un `/chats` avec le nom de l'interlocuteur.
-        Best-effort : ne lève jamais (la liste prime sur l'enrichissement)."""
+
+        Best-effort : ne lève jamais (la liste prime sur l'enrichissement). Mais
+        best-effort ne veut pas dire MUET — l'appelant a demandé cet enrichissement, et
+        la description de l'outil le lui promet ; s'il n'a pas eu lieu il doit
+        l'apprendre par la réponse, pas le déduire d'une absence.
+
+        Le cas qui a coûté (signal #682, 03/09/2026) : sur ~40 fils, l'agent a conclu
+        que « l'enrichissement annoncé dans la doc n'apparaît pas », sans pouvoir
+        distinguer une panne de résolution d'un carnet de contacts incomplet. Le
+        journal, lui, portait déjà l'avertissement — côté serveur, où l'appelant ne le
+        lit jamais.
+
+        Le pire des quatre silences n'est pas la panne, c'est la résolution PARTIELLE :
+        elle rend une liste hétérogène où l'absence de `attendee_name` se lit « ce fil
+        n'a pas d'interlocuteur » au lieu de « je n'ai pas su le nommer ».
+
+        Ne se dit QUE sur écart : tout résolu ⟹ rien à annoncer, l'appelant voit les
+        noms — et une page de fils pèse déjà ~105 Ko, on n'y ajoute pas du bruit."""
         items = (data or {}).get("items") if isinstance(data, dict) else None
         if not isinstance(items, list):
             return
+
+        def _dire(status: str, **kw) -> None:
+            if isinstance(data, dict):
+                data["attendee_names"] = {"status": status, **kw}
+
         ids = {str(it.get("attendee_provider_id"))
                for it in items
                if isinstance(it, dict) and it.get("attendee_provider_id")}
         if not ids:
+            if items:
+                _dire("unavailable", asked=0, resolved=0,
+                      reason="aucun fil ne porte d'`attendee_provider_id` : rien à "
+                             "résoudre. Le nom de l'interlocuteur reste lisible dans "
+                             "`name` (fils 1-à-1) ou via `last_message.sender`.")
             return
         try:
             resolved = self.resolve_attendee_names(ids)
-        except Exception:  # noqa: BLE001 — enrichissement best-effort voulu
+        except Exception as e:  # noqa: BLE001 — enrichissement best-effort voulu
             logger.warning("unipile chats: résolution attendees échouée, "
                            "liste servie sans enrichissement", exc_info=True)
+            _dire("unavailable", asked=len(ids), resolved=0,
+                  reason=f"la résolution des contacts a échoué ({type(e).__name__}) : "
+                         "les fils sont servis SANS `attendee_name`. Ce n'est pas "
+                         "l'absence d'interlocuteur — replie-toi sur `name` ou "
+                         "`last_message.sender`, ou rejoue l'appel.")
             return
+        manquants = []
         for it in items:
             if not isinstance(it, dict):
                 continue
-            att = resolved.get(str(it.get("attendee_provider_id") or ""))
+            pid = str(it.get("attendee_provider_id") or "")
+            att = resolved.get(pid)
             if not att:
+                if pid:
+                    manquants.append(pid)
                 continue
             it["attendee_name"] = att.get("name")
             it["attendee_headline"] = (att.get("specifics") or {}).get("occupation")
             it["attendee_profile_url"] = att.get("profile_url")
+        if manquants:
+            _dire("partial", asked=len(ids), resolved=len(ids) - len(set(manquants)),
+                  missing_ids=sorted(set(manquants))[:20],
+                  reason="ces interlocuteurs sont absents du carnet de contacts : leurs "
+                         "fils n'ont PAS de `attendee_name`, ce qui ne veut pas dire "
+                         "qu'ils n'ont pas d'interlocuteur. Nomme-les par "
+                         "`last_message.sender`.")
 
     def list_messages(self, chat_id: str, limit: int = 50) -> dict:
         params = {"limit": limit}

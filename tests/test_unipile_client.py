@@ -646,6 +646,55 @@ def test_chats_enrichment_failure_still_returns_list():
     assert "attendee_name" not in out["items"][0]
 
 
+def test_enrichment_failure_is_SAID_not_only_logged():
+    """Signal #682 : l'agent a conclu « l'enrichissement annoncé dans la doc n'apparaît
+    pas », sans pouvoir distinguer une panne d'un carnet incomplet. L'avertissement
+    existait — dans le journal serveur, que l'appelant ne lit jamais.
+
+    Best-effort ne veut pas dire muet : ce que l'appelant a DEMANDÉ et n'a pas obtenu
+    doit sortir par la réponse."""
+    c = _seq_client([("GET", "/acc/inboxes/CLASSIC_PRIMARY/chats", {"items": [
+        {"id": "c1", "name": None, "attendee_provider_id": "ACo111"}]})])
+    out = c.list_chats(limit=20, with_attendee_names=True)
+    an = out["attendee_names"]
+    assert an["status"] == "unavailable" and an["asked"] == 1 and an["resolved"] == 0
+    # Et il dit quoi FAIRE : l'absence de nom n'est pas l'absence d'interlocuteur.
+    assert "last_message.sender" in an["reason"]
+
+
+def test_resolution_PARTIELLE_est_dite_avec_les_ids_manquants():
+    """Le pire des silences : une liste hétérogène. Sans aveu, un fil sans
+    `attendee_name` se lit « pas d'interlocuteur » au lieu de « je n'ai pas su le
+    nommer » — et c'est indétectable, puisque les fils voisins, eux, ont leur nom."""
+    chats = {"items": [
+        {"id": "c1", "name": None, "attendee_provider_id": "ACo111"},
+        {"id": "c9", "name": None, "attendee_provider_id": "ACoINCONNU"}]}
+    c = _seq_client([
+        ("GET", "/acc/inboxes/CLASSIC_PRIMARY/chats", chats),
+        ("GET", "/acc/contacts", {"items": [
+            {"provider_id": "ACo111", "name": "Jane Doe", "specifics": {}}],
+            "cursor": None}),
+    ])
+    out = c.list_chats(limit=20, with_attendee_names=True)
+    an = out["attendee_names"]
+    assert an["status"] == "partial" and an["asked"] == 2 and an["resolved"] == 1
+    assert an["missing_ids"] == ["ACoINCONNU"]
+    by_id = {it["id"]: it for it in out["items"]}
+    assert by_id["c1"]["attendee_name"] == "Jane Doe"
+    assert "attendee_name" not in by_id["c9"]
+
+
+def test_tout_resolu_ne_dit_RIEN(monkeypatch):
+    """Pas d'écart, pas de bruit — et ici ça compte double : une page de fils pèse déjà
+    ~105 Ko et sature la fenêtre de l'appelant (même signal #682)."""
+    c = _seq_client([
+        ("GET", "/acc/inboxes/CLASSIC_PRIMARY/chats", _CHATS),
+        ("GET", "/acc/contacts", _CONTACTS_PAGE),
+    ])
+    out = c.list_chats(limit=20, with_attendee_names=True)
+    assert "attendee_names" not in out
+
+
 def test_resolve_attendee_names_stops_early_when_all_resolved():
     page1 = {"items": [{"provider_id": "A", "name": "Ann"}], "cursor": "NEXT"}
     c = _seq_client([("GET", "/acc/contacts", page1)])
