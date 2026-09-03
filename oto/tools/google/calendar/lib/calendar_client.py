@@ -149,6 +149,78 @@ class CalendarClient:
         event = self.service.events().insert(calendarId=calendar_id, body=body).execute()
         return self._format_event(event)
 
+    def update_event(
+        self,
+        event_id: str,
+        summary: Optional[str] = None,
+        start: Optional[str] = None,
+        end: Optional[str] = None,
+        description: Optional[str] = None,
+        location: Optional[str] = None,
+        all_day: bool = False,
+        calendar_id: str = 'primary',
+        send_updates: str = 'none',
+    ) -> dict:
+        """Patch an existing event — only the fields you pass are touched.
+
+        Uses `events.patch`, NOT `events.update`: the latter REPLACES the whole
+        event, so any field left out (attendees, recurrence, reminders, conference
+        data) would be silently dropped. A caller fixing a typo in the title would
+        cancel the meeting room.
+
+        ⚠️ `send_updates` is passed EXPLICITLY (default 'none') rather than relying
+        on the API default: correcting a title should not mail every attendee, and a
+        default we do not control could change under us. Pass 'all' to notify.
+
+        Args:
+            event_id: the event to patch (from list/get).
+            summary/start/end/description/location: only what you pass is changed.
+            all_day: treat start/end as dates (YYYY-MM-DD) rather than datetimes.
+            send_updates: 'none' (default) | 'all' | 'externalOnly'.
+        """
+        body: dict = {}
+        if summary is not None:
+            body['summary'] = summary
+        if description is not None:
+            body['description'] = description
+        if location is not None:
+            body['location'] = location
+        if start is not None:
+            body['start'] = {'date': start} if (all_day or len(start) == 10) \
+                else {'dateTime': start}
+        if end is not None:
+            body['end'] = {'date': end} if (all_day or len(end) == 10) \
+                else {'dateTime': end}
+        if not body:
+            raise ValueError(
+                "update_event: nothing to change — pass at least one of summary, "
+                "start, end, description, location. An empty patch would spend a "
+                "write and report success without touching anything.")
+        event = self.service.events().patch(
+            calendarId=calendar_id, eventId=event_id, body=body,
+            sendUpdates=send_updates).execute()
+        return self._format_event(event)
+
+    def delete_event(self, event_id: str, calendar_id: str = 'primary',
+                     send_updates: str = 'none') -> dict:
+        """Delete an event. Returns what was deleted, never an empty success.
+
+        `events.delete` answers 204 with NO body, so there is nothing to echo back
+        from the API: the event is read FIRST and its summary/start returned with the
+        confirmation. Without that, a caller deleting the wrong id would get the same
+        answer as one deleting the right one.
+
+        ⚠️ Irreversible, and `send_updates` defaults to 'none' for the same reason as
+        `update_event` — cancelling a meeting mails its attendees.
+        """
+        avant = self.get_event(event_id, calendar_id=calendar_id)
+        self.service.events().delete(
+            calendarId=calendar_id, eventId=event_id,
+            sendUpdates=send_updates).execute()
+        return {'deleted': True, 'id': event_id,
+                'summary': avant.get('summary'), 'start': avant.get('start'),
+                'calendar_id': calendar_id, 'notified': send_updates != 'none'}
+
     @staticmethod
     def _format_event(event: dict, detailed: bool = False) -> dict:
         """Format an event into a clean dict."""
