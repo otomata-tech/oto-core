@@ -21,6 +21,24 @@ from ...config import require_secret
 
 _HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
 
+# Le SCRAPE attend moins que le reste, et c'est un choix mesuré (oto-backend#662).
+# Sur une campagne de 193 passages d'agents (01/09/2026) : p95 de `scrape` à 61,6 s,
+# 58 expirations à 60 s, 31 % d'échec — et la moitié des échecs portait sur des URL
+# fabriquées par l'agent, qui ne pouvaient PAS répondre.
+#
+# ⚠️ Ce qui coûte n'est pas l'attente, c'est ce qu'elle emporte : pendant une minute
+# bloquée, le cache de contexte de l'agent expire. Le passage médian ayant scrapé a
+# coûté 72 077 jetons contre 35 798 sans — le DOUBLE — alors que la corrélation avec
+# le volume rapporté reste faible (r = +0,177). Un appel qui bloque une minute peut
+# donc coûter des dizaines de milliers de jetons SANS RIEN RAPPORTER.
+#
+# Une page qui n'a pas répondu en 15 s ne répondra pas mieux en 60 : le plafond
+# tombe là. Un pré-contrôle DNS (« un domaine inexistant se sait en millisecondes »)
+# a été écarté : notre résolution n'est pas celle de Serper, un refus fondé dessus ne
+# peut pas être garanti juste, et il ajouterait une attente bloquante sur le chemin
+# chaud. Le plafond court donne déjà 4× sans rien risquer.
+_SCRAPE_TIMEOUT = (5, 15)
+
 
 class SerperClient:
     """
@@ -66,12 +84,17 @@ class SerperClient:
             time.sleep(self._min_interval - elapsed)
         self._last_request = time.time()
 
-    def _post(self, url: str, json_data: Dict, label: str) -> Dict:
+    def _post(self, url: str, json_data: Dict, label: str,
+              timeout: Optional[tuple] = None) -> Dict:
         """POST + gestion d'erreur. Surface le message d'erreur Serper plutôt
         qu'un opaque "400 Bad Request" (Serper renvoie 400 + {"message":...}
-        pour "Not enough credits", clé invalide, etc.)."""
+        pour "Not enough credits", clé invalide, etc.).
+
+        `timeout` = `(connexion, lecture)` en secondes ; `None` = le défaut du
+        client. Le scrape en pose un plus court, cf. `_SCRAPE_TIMEOUT`."""
         self._rate_limit()
-        response = self.session.post(url, json=json_data, timeout=_HTTP_TIMEOUT)
+        response = self.session.post(url, json=json_data,
+                                     timeout=timeout or _HTTP_TIMEOUT)
         if response.status_code >= 400:
             try:
                 msg = response.json().get("message") or response.text
@@ -672,13 +695,18 @@ class SerperClient:
         self,
         url: str,
         include_markdown: bool = False,
+        timeout_s: Optional[int] = None,
     ) -> Dict[str, Any]:
         """
-        Scrape a web page.
+        Scrape a web page. Waits 15 s at most by default, not 60.
 
         Args:
             url: URL to scrape
             include_markdown: Include markdown version
+            timeout_s: seconds to wait for the page, 1-60. Default 15 — a page
+                that has not answered in 15 s will not answer better in 60, and
+                the wait costs the caller far more than the wait itself (an
+                agent's context cache expires while it blocks).
 
         Returns:
             Page data with text, metadata, and JSON-LD
@@ -687,6 +715,9 @@ class SerperClient:
             RuntimeError: si l'hôte refuse structurellement le scrape serveur — le
                 message dit le fait (source close à l'extraction) sans prescrire un
                 outil : l'appelant décide avec le jeu d'outils qu'il a.
+            requests.Timeout: la page n'a pas répondu dans le délai. C'est un
+                ÉCHEC NORMAL, pas une panne : la moitié des expirations mesurées
+                portaient sur des adresses qui ne pouvaient pas répondre.
         """
         why = self._refuses_scraping(url)
         if why:
@@ -694,7 +725,11 @@ class SerperClient:
         payload: Dict[str, Any] = {"url": url}
         if include_markdown:
             payload["includeMarkdown"] = True
-        return self._post(self.SCRAPE_URL, payload, "scrape")
+        delai = _SCRAPE_TIMEOUT
+        if timeout_s is not None:
+            borne = max(1, min(int(timeout_s), 60))
+            delai = (min(_SCRAPE_TIMEOUT[0], borne), borne)
+        return self._post(self.SCRAPE_URL, payload, "scrape", timeout=delai)
 
     # --------------------------------------------------------- autocomplete
 
