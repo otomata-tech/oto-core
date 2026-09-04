@@ -131,13 +131,19 @@ class PennylaneClient(LedgerMixin):
 
         return {"error": "Max retries exceeded"}
 
-    def delete(self, endpoint: str, retries: int = 3) -> dict:
-        """DELETE a resource on Pennylane API with retry on rate limit."""
+    def delete(self, endpoint: str, data: Optional[dict] = None,
+               retries: int = 3) -> dict:
+        """DELETE a resource on Pennylane API with retry on rate limit.
+
+        `data` : corps de requête. Inhabituel sur un DELETE, mais Pennylane en
+        exige un pour le délettrage (`DELETE /ledger_entry_lines/lettering` prend
+        les lignes à délettrer) — sans lui, ce geste n'est pas exprimable.
+        """
         url = f"{self.BASE_URL}/{endpoint}"
 
         for attempt in range(retries):
             try:
-                response = self.session.delete(url, timeout=30)
+                response = self.session.delete(url, json=data, timeout=30)
 
                 if response.status_code == 429:
                     wait_time = 2 ** attempt
