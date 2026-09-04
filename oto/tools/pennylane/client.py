@@ -28,6 +28,7 @@ import requests
 
 from ...config import require_secret
 from ..common import FieldFilter, UpstreamHTTPError
+from .ledger import LedgerMixin
 
 
 def _is_outstanding(transaction) -> bool:
@@ -45,8 +46,12 @@ def _is_outstanding(transaction) -> bool:
         return True
 
 
-class PennylaneClient:
-    """Client for Pennylane API v2"""
+class PennylaneClient(LedgerMixin):
+    """Client for Pennylane API v2.
+
+    Le grand livre (écritures, journaux, lettrage de lignes) vit dans
+    `LedgerMixin` — même découpage que `brevo`, cf. `ledger.py`.
+    """
 
     BASE_URL = "https://app.pennylane.com/api/external/v2"
 
@@ -278,14 +283,6 @@ class PennylaneClient:
             'period_start': start_date,
             'period_end': end_date
         })
-
-    def get_ledger_accounts(self) -> list:
-        """Get all ledger accounts."""
-        return self.fetch_all_pages("ledger_accounts")
-
-    def get_ledger_entries(self, max_pages: Optional[int] = None) -> list:
-        """Get ledger entries."""
-        return self.fetch_all_pages("ledger_entries", max_pages=max_pages)
 
     def get_customer_invoices(self, max_pages: Optional[int] = None) -> list:
         """Get customer invoices."""
