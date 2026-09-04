@@ -196,7 +196,7 @@ class SalesforceClient:
         headers = {"Authorization": f"Bearer {token}"}
 
         for attempt in range(2):
-            resp = requests.request(method, url, headers=headers, **kwargs)
+            resp = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
 
             # Token expired — refresh once and retry
             if resp.status_code == 401 and attempt == 0:
