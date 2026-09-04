@@ -72,6 +72,28 @@ def appels_sans_delai(source: str, chemin: str = "<mémoire>") -> list[str]:
         arbre = ast.parse(source)
     except SyntaxError:
         return []
+    # Fonctions qui posent le délai DANS les kwargs avant d'appeler :
+    # `kwargs.setdefault("timeout", …)`. L'appel y passe `**kwargs` et porte donc
+    # bien une borne, sans kwarg littéral. Ne pas reconnaître cette forme a coûté
+    # deux modules cassés : l'insertion « corrective » y créait un doublon
+    # d'argument, et 59 tests sont tombés (oto-backend#867, 04/09/2026).
+    bornees_par_kwargs = set()
+    for fn in ast.walk(arbre):
+        if not isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        pose = any(isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+                   and n.func.attr == "setdefault" and n.args
+                   and isinstance(n.args[0], ast.Constant) and n.args[0].value == "timeout"
+                   for n in ast.walk(fn))
+        if pose:
+            bornees_par_kwargs.add(id(fn))
+
+    def _dans_une_fonction_qui_pose(appel) -> bool:
+        for fn in ast.walk(arbre):
+            if id(fn) in bornees_par_kwargs and appel in ast.walk(fn):
+                return any(k.arg is None for k in appel.keywords)   # passe **kwargs
+        return False
+
     fautes = []
     for n in ast.walk(arbre):
         if not (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)):
@@ -80,8 +102,11 @@ def appels_sans_delai(source: str, chemin: str = "<mémoire>") -> list[str]:
             continue
         if not _est_un_appel_http(n, _porteur(n)):
             continue
-        if "timeout" not in {k.arg for k in n.keywords}:
-            fautes.append(f"{chemin}:{n.lineno}")
+        if "timeout" in {k.arg for k in n.keywords}:
+            continue
+        if _dans_une_fonction_qui_pose(n):
+            continue
+        fautes.append(f"{chemin}:{n.lineno}")
     return fautes
 
 
@@ -93,29 +118,17 @@ def _appels_nus_du_depot() -> list[str]:
     return fautes
 
 
-# Cliquet, le temps de poser les 17 bornes (oto-backend#867). Il ne monte JAMAIS :
-# chaque module borné le fait descendre, et il finit à 0 — moment où ce plafond
-# disparaît et où le test redevient absolu. Il existe pour ne pas laisser le tronc
-# rouge pendant la série de commits, pas pour tolérer un état.
-_PLAFOND = 0
+# Le cliquet qui a accompagné la pose des 17 bornes est retiré : le compte est à
+# zéro, le témoin est redevenu ABSOLU. Il n'y a plus de plafond à négocier, et
+# c'était le but — un seuil qui survit à sa transition devient un budget de dette.
 
 
 def test_aucun_appel_http_sans_delai():
     fautes = _appels_nus_du_depot()
-    assert len(fautes) <= _PLAFOND, (
-        f"{len(fautes)} appels HTTP sans `timeout` (plafond {_PLAFOND}) — un appel "
-        "nu peut immobiliser un worker à vie :\n  " + "\n  ".join(fautes)
+    assert not fautes, (
+        f"{len(fautes)} appel(s) HTTP sans `timeout` — un appel nu attend "
+        "indéfiniment et immobilise un worker à vie :\n  " + "\n  ".join(fautes)
         + "\nAjouter `timeout=(connexion, lecture)`, p. ex. `timeout=_HTTP_TIMEOUT`.")
-
-
-def test_le_plafond_ne_remonte_pas():
-    """Le cliquet : dès que le compte descend, le plafond doit suivre. Sans ça il
-    devient un budget de dette au lieu d'une trajectoire."""
-    fautes = _appels_nus_du_depot()
-    assert _PLAFOND <= 17, "le plafond ne remonte jamais"
-    assert len(fautes) >= _PLAFOND - 3, (
-        f"le compte réel ({len(fautes)}) est bien sous le plafond ({_PLAFOND}) : "
-        "abaisser `_PLAFOND` à cette valeur, sinon le témoin cesse de mordre.")
 
 
 # --- les épreuves du détecteur lui-même ------------------------------------
@@ -165,3 +178,24 @@ def test_le_detecteur_ne_regarde_pas_un_module_sans_client_http():
     faux positif sans rien gagner."""
     src = "def f(d):\n    return d.get('x')\n"
     assert appels_sans_delai(src) == []
+
+
+def test_le_detecteur_reconnait_un_delai_pose_dans_les_kwargs():
+    """`kwargs.setdefault("timeout", …)` puis `**kwargs` EST une borne. L'ignorer
+    a coûté deux modules cassés : l'insertion corrective y créait un doublon
+    d'argument, et 59 tests sont tombés d'un coup."""
+    src = ("import requests\n_HTTP_TIMEOUT = (10, 60)\n"
+           "def _request(self, method, url, **kwargs):\n"
+           "    kwargs.setdefault('timeout', _HTTP_TIMEOUT)\n"
+           "    return requests.request(method, url, **kwargs)\n")
+    assert appels_sans_delai(src) == []
+
+
+def test_le_detecteur_ne_se_laisse_pas_berner_par_un_setdefault_voisin():
+    """L'autre sens : poser le délai dans une fonction et appeler SANS `**kwargs`
+    ne borne rien. Le détecteur doit encore le voir."""
+    src = ("import requests\n_HTTP_TIMEOUT = (10, 60)\n"
+           "def _request(self, method, url, **kwargs):\n"
+           "    kwargs.setdefault('timeout', _HTTP_TIMEOUT)\n"
+           "    return requests.request(method, url)\n")
+    assert appels_sans_delai(src) == ["<mémoire>:5"]

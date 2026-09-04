@@ -94,7 +94,7 @@ class KasprClient:
         }
 
         kwargs.setdefault("timeout", self.TIMEOUT)
-        response = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
+        response = requests.request(method, url, headers=headers, **kwargs)
         response.raise_for_status()
         return response.json()
 
