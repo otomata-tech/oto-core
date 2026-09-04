@@ -11,6 +11,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 # Kaspr veut le SLUG NU : une URL complète (ou un slash/query) fait un 500
 # (vérifié live : `alexislaporte` → 200, `https://.../in/alexislaporte/` → 500).
 _LINKEDIN_IN = re.compile(r"/in/([^/?#]+)", re.IGNORECASE)
@@ -92,7 +94,7 @@ class KasprClient:
         }
 
         kwargs.setdefault("timeout", self.TIMEOUT)
-        response = requests.request(method, url, headers=headers, **kwargs)
+        response = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
         response.raise_for_status()
         return response.json()
 
