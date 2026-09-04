@@ -9,6 +9,8 @@ from ...config import require_secret, get_secret
 from ..common import raise_for_upstream
 from .auth import ZohoAuthError, cred_key, get_access_token, invalidate
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 __all__ = ["ZohoAuthError", "ZohoClient"]
 
 
@@ -66,7 +68,7 @@ class ZohoClient:
         headers = {"Authorization": f"Zoho-oauthtoken {token}"}
 
         for attempt in range(3):
-            resp = requests.request(method, url, headers=headers, **kwargs)
+            resp = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
 
             # Token expired — refresh once and retry
             if resp.status_code == 401 and attempt == 0:
