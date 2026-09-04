@@ -13,6 +13,8 @@ import requests
 
 from ....config import get_cache_dir
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 logger = logging.getLogger(__name__)
 
 
@@ -115,7 +117,7 @@ class NotionClient:
                 headers=self.headers,
                 params=params,
                 json=data
-            )
+            , timeout=_HTTP_TIMEOUT)
             response.raise_for_status()
             result = response.json()
 
