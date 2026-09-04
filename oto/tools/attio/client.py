@@ -12,6 +12,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 @dataclass
 class Company:
@@ -694,7 +696,7 @@ class AttioClient:
             "Content-Type": "application/json",
         }
 
-        response = requests.request(method, url, headers=headers, **kwargs)
+        response = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
 
         if response.status_code == 429:
             raise Exception("Rate limit exceeded")
