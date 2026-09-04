@@ -68,6 +68,8 @@ import requests
 from ...config import require_secret
 from ..common import raise_for_upstream
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class SnitcherClient:
     BASE_URL = "https://api.snitcher.com/v1"
@@ -81,7 +83,7 @@ class SnitcherClient:
     def _request(self, method: str, path: str, *, json: Any = None, params: Dict = None) -> Any:
         resp = requests.request(
             method, f"{self.BASE_URL}{path}", headers=self._headers(), json=json, params=params
-        )
+        , timeout=_HTTP_TIMEOUT)
         raise_for_upstream(resp, service="snitcher")
         return resp.json() if resp.content else None
 
