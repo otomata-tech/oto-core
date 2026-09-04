@@ -11,6 +11,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class ApolloError(RuntimeError):
     """Erreur API Apollo, **message amont remonté tel quel**.
@@ -77,7 +79,7 @@ class ApolloClient:
         url = f"{self.BASE_URL}/{endpoint}"
         headers = {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
 
-        response = requests.request(method, url, headers=headers, **kwargs)
+        response = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
         if not response.ok:
             raise ApolloError(
                 f"Apollo {response.status_code} sur {endpoint} : "

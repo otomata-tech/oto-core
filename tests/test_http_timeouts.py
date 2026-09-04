@@ -97,7 +97,7 @@ def _appels_nus_du_depot() -> list[str]:
 # chaque module borné le fait descendre, et il finit à 0 — moment où ce plafond
 # disparaît et où le test redevient absolu. Il existe pour ne pas laisser le tronc
 # rouge pendant la série de commits, pas pour tolérer un état.
-_PLAFOND = 17
+_PLAFOND = 16
 
 
 def test_aucun_appel_http_sans_delai():
