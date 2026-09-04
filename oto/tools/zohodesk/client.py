@@ -27,6 +27,8 @@ from ..common import raise_for_upstream
 from ..common.errors import UpstreamHTTPError
 from ..zoho.auth import ZohoAuthError, cred_key, get_access_token, invalidate
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 # Endpoint Desk → scope OAuth qui le débloque. Zoho répond `403 SCOPE_MISMATCH` sans
 # JAMAIS dire quel scope manque — or c'est la seule information utile : le remède est de
@@ -112,7 +114,7 @@ class ZohoDeskClient:
             headers["Content-Type"] = "application/json"
 
         for attempt in range(3):
-            resp = requests.request(method, url, headers=headers, **kwargs)
+            resp = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
 
             if resp.status_code == 401 and attempt == 0:
                 self._invalidate_token()
