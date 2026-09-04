@@ -202,7 +202,7 @@ class SlackClient:
         url = f"{self.BASE_URL}/{endpoint}"
         headers = {"Authorization": f"Bearer {self._resolve_token(as_user)}"}
 
-        response = requests.request(method, url, headers=headers, **kwargs)
+        response = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
         response.raise_for_status()
 
         data = response.json()
