@@ -14,6 +14,8 @@ import requests
 
 from ...config import require_secret
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class AudioClient:
     BASE_URL = "https://audio-recorder-transcript.tuls.me"
@@ -24,7 +26,7 @@ class AudioClient:
     def _request(self, method: str, endpoint: str, **kwargs) -> Any:
         url = f"{self.BASE_URL}{endpoint}"
         headers = {"Authorization": f"Bearer {self.api_token}"}
-        resp = requests.request(method, url, headers=headers, **kwargs)
+        resp = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
         resp.raise_for_status()
         if resp.status_code == 204:
             return {}
