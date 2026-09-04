@@ -27,7 +27,8 @@ from typing import Optional
 import requests
 
 from ...config import require_secret
-from ..common import FieldFilter, UpstreamHTTPError
+from ..common import FieldFilter
+from ..common.errors import raise_for_upstream
 from .ledger import LedgerMixin
 
 
@@ -76,131 +77,80 @@ class PennylaneClient(LedgerMixin):
             "Accept": "application/json",
         })
 
-    def post(self, endpoint: str, data: dict, retries: int = 3) -> dict:
-        """POST data to Pennylane API with retry on rate limit."""
+    def _appel(self, methode: str, endpoint: str, *, params: Optional[dict] = None,
+               data: Optional[dict] = None, retries: int = 3) -> dict:
+        """UN appel à l'API, et le seul endroit qui traduit un refus.
+
+        Un refus amont est une **exception**, jamais une valeur de retour. Cette
+        règle était déjà écrite deux fois en aval — dans `fetch_all_pages` et
+        dans `_filter_eq` — parce que le transport ne la portait pas : chacun
+        rattrapait le dict pour son propre compte, et tout appelant qui n'y
+        pensait pas lisait un refus comme un résultat (oto-backend#223 pour la
+        première moitié, oto-core#77 pour celle-ci). Les deux copies sont
+        parties avec ce passage unique.
+
+        Le `try` ne couvre que l'aller-retour réseau : sans ça, il rattraperait
+        l'exception qu'on vient de lever et la transformerait à nouveau en
+        valeur — le défaut exact qu'on ferme.
+        """
         url = f"{self.BASE_URL}/{endpoint}"
 
         for attempt in range(retries):
             try:
-                response = self.session.post(url, json=data, timeout=30)
-
-                if response.status_code == 429:
-                    wait_time = 2 ** attempt
-                    time.sleep(wait_time)
-                    continue
-
-                if not response.ok:
-                    return {
-                        "error": str(response.status_code),
-                        "details": response.text,
-                        "status_code": response.status_code,
-                    }
-
-                if response.status_code == 204 or not response.content:
-                    return {"ok": True}
-
-                return self.field_filter.apply(response.json())
+                response = self.session.request(
+                    methode, url, params=params, json=data, timeout=30)
             except Exception as e:
-                return {"error": str(e)}
+                raise RuntimeError(f"pennylane: {methode} {endpoint} — {e}") from e
 
-        return {"error": "Max retries exceeded"}
+            if response.status_code == 429:
+                time.sleep(2 ** attempt)
+                continue
+
+            raise_for_upstream(response, service="pennylane")
+
+            if response.status_code == 204 or not response.content:
+                return {"ok": True}
+            try:
+                charge = response.json()
+            except ValueError as e:
+                raise RuntimeError(
+                    f"pennylane: {methode} {endpoint} a répondu "
+                    f"{response.status_code} sans JSON lisible — "
+                    f"{response.text[:200]!r}") from e
+            return self.field_filter.apply(charge)
+
+        raise RuntimeError(
+            f"pennylane: {methode} {endpoint} — débit limité (429) après "
+            f"{retries} tentatives.")
+
+    def post(self, endpoint: str, data: dict, retries: int = 3) -> dict:
+        """POST sur l'API Pennylane. Lève sur refus amont."""
+        return self._appel("POST", endpoint, data=data, retries=retries)
 
     def put(self, endpoint: str, data: dict, retries: int = 3) -> dict:
-        """PUT data to Pennylane API with retry on rate limit."""
-        url = f"{self.BASE_URL}/{endpoint}"
-
-        for attempt in range(retries):
-            try:
-                response = self.session.put(url, json=data, timeout=30)
-
-                if response.status_code == 429:
-                    wait_time = 2 ** attempt
-                    time.sleep(wait_time)
-                    continue
-
-                if not response.ok:
-                    return {
-                        "error": str(response.status_code),
-                        "details": response.text,
-                        "status_code": response.status_code,
-                    }
-
-                return self.field_filter.apply(response.json())
-            except Exception as e:
-                return {"error": str(e)}
-
-        return {"error": "Max retries exceeded"}
+        """PUT sur l'API Pennylane. Lève sur refus amont."""
+        return self._appel("PUT", endpoint, data=data, retries=retries)
 
     def delete(self, endpoint: str, data: Optional[dict] = None,
                retries: int = 3) -> dict:
-        """DELETE a resource on Pennylane API with retry on rate limit.
+        """DELETE sur l'API Pennylane. Lève sur refus amont.
 
         `data` : corps de requête. Inhabituel sur un DELETE, mais Pennylane en
         exige un pour le délettrage (`DELETE /ledger_entry_lines/lettering` prend
         les lignes à délettrer) — sans lui, ce geste n'est pas exprimable.
         """
-        url = f"{self.BASE_URL}/{endpoint}"
+        return self._appel("DELETE", endpoint, data=data, retries=retries)
 
-        for attempt in range(retries):
-            try:
-                response = self.session.delete(url, json=data, timeout=30)
-
-                if response.status_code == 429:
-                    wait_time = 2 ** attempt
-                    time.sleep(wait_time)
-                    continue
-
-                if not response.ok:
-                    return {
-                        "error": str(response.status_code),
-                        "details": response.text,
-                        "status_code": response.status_code,
-                    }
-
-                if response.status_code == 204 or not response.content:
-                    return {"ok": True}
-
-                return self.field_filter.apply(response.json())
-            except Exception as e:
-                return {"error": str(e)}
-
-        return {"error": "Max retries exceeded"}
-
-    def fetch(self, endpoint: str, params: Optional[dict] = None, retries: int = 3) -> dict:
-        """
-        Fetch data from Pennylane API with retry on rate limit.
+    def fetch(self, endpoint: str, params: Optional[dict] = None,
+              retries: int = 3) -> dict:
+        """Lecture sur l'API Pennylane. Lève sur refus amont.
 
         Args:
-            endpoint: API endpoint (e.g., "me", "trial_balance", "ledger_accounts")
-            params: Optional query parameters
-            retries: Number of retries on rate limit
-
-        Returns:
-            JSON response as dict
+            endpoint: chemin (ex. "me", "trial_balance", "ledger_accounts")
+            params: paramètres de requête
+            retries: tentatives sur limitation de débit
         """
-        url = f"{self.BASE_URL}/{endpoint}"
-
-        for attempt in range(retries):
-            try:
-                response = self.session.get(url, params=params, timeout=30)
-
-                if response.status_code == 429:  # Rate limited
-                    wait_time = 2 ** attempt
-                    time.sleep(wait_time)
-                    continue
-
-                if not response.ok:
-                    return {
-                        "error": str(response.status_code),
-                        "details": response.text,
-                        "status_code": response.status_code,
-                    }
-
-                return self.field_filter.apply(response.json())
-            except Exception as e:
-                return {"error": str(e)}
-
-        return {"error": "Max retries exceeded"}
+        return self._appel("GET", endpoint, params=params, retries=retries)
 
     def fetch_all_pages(
         self,
@@ -232,22 +182,11 @@ class PennylaneClient(LedgerMixin):
             if cursor:
                 params['cursor'] = cursor
 
+            # `fetch` LÈVE sur refus amont : une erreur ne peut plus être avalée
+            # en liste vide, ce qui faisait confondre « erreur d'auth » et « aucun
+            # résultat » et recréer des avoirs en double (oto-backend#223).
             data = self.fetch(endpoint, params)
             time.sleep(self.rate_limit_delay)
-
-            # Une erreur amont (401 clé périmée, 4xx/5xx, réseau) NE DOIT PAS être
-            # avalée en liste vide : sinon un consommateur anti-doublon (ex.
-            # find_invoice_by_external_reference) confond « erreur d'auth » et
-            # « aucun résultat » et recrée des avoirs en double (oto-backend#223).
-            # On lève — UpstreamHTTPError si un status HTTP est porté (le backend
-            # le classe en erreur connecteur gérée via `.status_code`), sinon une
-            # erreur générique (réseau / max retries) qui remonte tout de même.
-            if isinstance(data, dict) and 'error' in data:
-                status = data.get('status_code')
-                if isinstance(status, int):
-                    raise UpstreamHTTPError(status, data.get('details') or data['error'],
-                                            service="pennylane")
-                raise RuntimeError(f"pennylane: {data['error']}")
 
             if isinstance(data, dict) and 'items' in data:
                 items = data['items']
@@ -365,22 +304,22 @@ class PennylaneClient(LedgerMixin):
 
         Variante de `upload_file` pour un appelant qui détient déjà les octets
         (fichier « côté oto » : Drive, pièce Gmail, URL — résolus en amont). Poste
-        en multipart sur `POST /file_attachments`. Renvoie `{id, filename, url}` ;
-        sur erreur `{error, details, status_code}`. L'`id` est le `file_attachment_id`
-        à passer à `import_supplier_invoice`.
+        en multipart sur `POST /file_attachments`. Renvoie `{id, filename, url}` et
+        LÈVE sur refus amont. L'`id` est le `file_attachment_id` à passer à
+        `import_supplier_invoice`.
         """
         url = f"{self.BASE_URL}/file_attachments"
-        response = self.session.post(
-            url,
-            files={"file": (filename, io.BytesIO(data), content_type)},
-            timeout=60,
-        )
-        if not response.ok:
-            return {
-                "error": str(response.status_code),
-                "details": response.text,
-                "status_code": response.status_code,
-            }
+        try:
+            response = self.session.post(
+                url,
+                files={"file": (filename, io.BytesIO(data), content_type)},
+                timeout=60,
+            )
+        except Exception as e:
+            raise RuntimeError(f"pennylane: dépôt de {filename} — {e}") from e
+        # Multipart : ne passe pas par `_appel`, mais suit la même règle — un
+        # refus est une exception, jamais une valeur.
+        raise_for_upstream(response, service="pennylane")
         return response.json()
 
     def import_supplier_invoice(
@@ -440,12 +379,6 @@ class PennylaneClient(LedgerMixin):
         import json as _json
         flt = _json.dumps([{"field": field, "operator": "eq", "value": str(value)}])
         data = self.fetch(endpoint, {"filter": flt})
-        if isinstance(data, dict) and "error" in data:
-            status = data.get("status_code")
-            if isinstance(status, int):
-                raise UpstreamHTTPError(status, data.get("details") or data["error"],
-                                        service="pennylane")
-            raise RuntimeError(f"pennylane: {data['error']}")
         return data.get("items", []) if isinstance(data, dict) else []
 
     def find_customer_by_external_reference(self, external_reference: str):
