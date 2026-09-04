@@ -10,6 +10,8 @@ import requests
 from ...config import require_secret
 from ..common import raise_for_upstream
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class LushaClient:
     BASE_URL = "https://api.lusha.com"
@@ -22,7 +24,7 @@ class LushaClient:
 
     def _request(self, method: str, path: str, **kwargs) -> dict:
         headers = {"api_key": self.api_key, "Content-Type": "application/json"}
-        resp = requests.request(method, f"{self.BASE_URL}{path}", headers=headers, **kwargs)
+        resp = requests.request(method, f"{self.BASE_URL}{path}", headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
         raise_for_upstream(resp, service="lusha")
         return resp.json() if resp.content else {}
 
