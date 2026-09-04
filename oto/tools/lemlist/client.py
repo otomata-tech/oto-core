@@ -147,7 +147,7 @@ class LemlistClient:
         headers = {"Authorization": self._get_auth_header()}
 
         kwargs.setdefault("timeout", _HTTP_TIMEOUT)
-        response = requests.request(method, url, headers=headers, **kwargs)
+        response = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
         if response.status_code not in tolerate:
             raise_for_upstream(response, service="lemlist")
 
