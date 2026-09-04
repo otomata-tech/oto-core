@@ -33,6 +33,8 @@ import requests
 from ...config import require_secret
 from ..common import raise_for_upstream
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class WebflowClient:
     BASE_URL = "https://api.webflow.com/v2"
@@ -75,7 +77,7 @@ class WebflowClient:
         if method.upper() not in ("GET", "DELETE"):
             headers["Content-Type"] = "application/json"
         for attempt in range(3):
-            resp = requests.request(method, url, headers=headers, **kwargs)
+            resp = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
             if resp.status_code == 429:
                 # Webflow renvoie Retry-After (généralement 60s, cf. doc rate-limits).
                 wait = int(resp.headers.get("Retry-After", 60))
