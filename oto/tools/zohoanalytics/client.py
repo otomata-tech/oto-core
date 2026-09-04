@@ -18,6 +18,8 @@ from ...config import require_secret, get_secret
 from ..common import raise_for_upstream
 from ..zoho.auth import ZohoAuthError, cred_key, get_access_token, invalidate
 
+_HTTP_TIMEOUT = (10, 60)  # (connexion, lecture) — jamais d'attente illimitée
+
 
 class ZohoAnalyticsClient:
     def __init__(
@@ -94,7 +96,7 @@ class ZohoAnalyticsClient:
         build = self._headers if with_org else self._auth_headers
         headers = build()
         for attempt in range(3):
-            resp = requests.request(method, url, headers=headers, **kwargs)
+            resp = requests.request(method, url, headers=headers, timeout=_HTTP_TIMEOUT, **kwargs)
 
             if resp.status_code == 401 and attempt == 0:
                 self._invalidate_token()
