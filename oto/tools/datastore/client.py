@@ -53,8 +53,26 @@ class DatastoreClient:
     def list_namespaces(self) -> list[dict]:
         return self._req("GET", "/api/datastore/namespaces")["namespaces"]
 
-    def create_namespace(self, namespace: str) -> dict:
-        return self._req("POST", "/api/datastore/namespaces", json={"namespace": namespace})
+    def create_namespace(self, namespace: str,
+                         owner: Optional[dict] = None) -> dict:
+        """Crée un tableau. Rend `{namespace, id, url, owner_type, owner_id,
+        is_personal}` — et un `avertissement` si le contexte d'org était posé sans
+        `owner`.
+
+        ⚠️ Sans `owner`, le tableau est PERSONNEL : visible de vous seul, pas des
+        autres membres de votre organisation ni de ses administrateurs. Le contexte
+        d'org de l'appel n'y change RIEN — seul `owner` décide, et il ne se change
+        pas après coup. Passer `{"type": "org"|"group", "id": N}` pour un tableau
+        partagé.
+
+        Le paramètre manquait ici : un intégrateur qui passait par cette lib ne
+        POUVAIT PAS créer un tableau d'organisation, alors que la route l'accepte
+        depuis toujours (otomata-tech/oto#45).
+        """
+        corps: dict = {"namespace": namespace}
+        if owner:
+            corps["owner"] = owner
+        return self._req("POST", "/api/datastore/namespaces", json=corps)
 
     def delete_namespace(self, namespace: str) -> dict:
         return self._req("DELETE", f"/api/datastore/namespaces/{namespace}")
