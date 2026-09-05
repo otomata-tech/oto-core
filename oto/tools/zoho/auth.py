@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import hashlib
 import time
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
@@ -64,10 +64,24 @@ def _host(url: str) -> str:
 
 
 def get_access_token(accounts_url: str, client_id: str, client_secret: str,
-                     refresh_token: str, *, key: Optional[str] = None) -> str:
+                     refresh_token: str, *, key: Optional[str] = None,
+                     on_refresh: Optional[Callable[[dict], None]] = None) -> str:
     """Token d'accès valide pour ce credential, rafraîchi seulement si nécessaire.
 
     Aucun secret ne transite par l'URL ni par les messages d'erreur.
+
+    `on_refresh(token_data)` est appelé après chaque rafraîchissement RÉUSSI, avec
+    la réponse complète du serveur d'autorisation. Symétrique de l'`on_refresh` du
+    client Salesforce, et pour la même raison : c'est le seul moment où l'appelant
+    apprend que ce credential authentifie RÉELLEMENT, à l'instant présent.
+
+    ⚠️ Il n'est PAS appelé sur un succès de cache. Un jeton encore valide prouve
+    qu'un refresh a marché il y a un moment, pas que le credential marche
+    maintenant : s'en servir comme preuve de vie démarquerait une ligne sur une
+    information périmée — exactement ce qu'un démarquage ne doit pas faire.
+
+    Best-effort : une panne du rappel ne fait pas échouer un appel dont le jeton,
+    lui, est valide.
     """
     # Connexion en DEUX temps (mode server-based) : l'app est posée, le consentement
     # pas encore donné → pas de refresh token. On le dit clairement ici plutôt que de
@@ -124,6 +138,12 @@ def get_access_token(accounts_url: str, client_id: str, client_secret: str,
 
     token = token_data["access_token"]
     _TOKEN_CACHE[k] = (token, time.time() + int(token_data.get("expires_in", 3600)))
+    if on_refresh is not None:
+        try:
+            on_refresh(token_data)
+        # noqa: SILENT — effet de bord de l'appelant : sa panne ne casse pas l'appel
+        except Exception:  # noqa: BLE001 — le jeton, lui, est valide
+            pass
     return token
 
 

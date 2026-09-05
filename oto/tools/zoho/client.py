@@ -1,7 +1,7 @@
 """Zoho CRM API Client — https://www.zoho.com/crm/developer/docs/api/v7/"""
 
 import time
-from typing import Any, Optional
+from typing import Callable, Any, Optional
 
 import requests
 
@@ -24,6 +24,7 @@ class ZohoClient:
         refresh_token: Optional[str] = None,
         api_domain: Optional[str] = None,
         accounts_url: Optional[str] = None,
+        on_refresh: Optional[Callable[[dict], None]] = None,
     ):
         """Initialise le client.
 
@@ -44,6 +45,10 @@ class ZohoClient:
             "ZOHO_ACCOUNTS_URL", "https://accounts.zoho.com")
         self._cred_key = cred_key(
             self.accounts_url, self.client_id, self.refresh_token)
+        # Appelé après chaque refresh RÉUSSI — jamais sur un succès de cache.
+        # Symétrique de l'`on_refresh` du client Salesforce : c'est le seul instant
+        # où l'appelant apprend que ce credential authentifie vraiment, maintenant.
+        self._on_refresh = on_refresh
 
     # --- Auth ---
 
@@ -54,7 +59,7 @@ class ZohoClient:
         rate-limite alors `/oauth/v2/token` (tous les appels en 400 pendant ~5 min)."""
         return get_access_token(self.accounts_url, self.client_id,
                                 self.client_secret, self.refresh_token,
-                                key=self._cred_key)
+                                key=self._cred_key, on_refresh=self._on_refresh)
 
     def _invalidate_token(self):
         """Forget the cached token to force a refresh on next request."""
