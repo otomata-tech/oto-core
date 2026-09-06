@@ -19,6 +19,17 @@ Donc : un connecteur = un client ici, plusieurs faces (CLI, MCP). [[meta otomata
 - Python ≥3.10, setuptools (namespace package). Version dans `pyproject.toml`.
 - Deps cœur : requests, france-opendata, python-dotenv, pyyaml. **Pas de typer** (c'est la façade oto-cli).
 - Extras : `google`, `browser` (o-browser), `vivatech`, `anthropic`, `stock`. `all`.
+- **`uv.lock` est commité et ne gouverne AUCUNE install.** Les deps sont déclarées en
+  **plancher** (`>=`) : le graphe de dépendances GitHub ne peut alors attribuer aucune
+  version aux paquets du `pyproject.toml`, donc **aucune alerte de sécurité ne peut se
+  déclencher** — zéro depuis la création du dépôt, alors que des libs qu'il consomme
+  portent des avis publiés. Le lock donne au graphe des versions exactes, rien de plus :
+  il est **absent de la wheel ET du sdist** (donc invisible à `pip install oto-core`),
+  et un consommateur `uv` **ignore le lock de sa dépendance** (mesuré le 2026-09-07,
+  y compris sur une dép `path`) — oto-backend et oto-cli continuent de résoudre oto-core
+  depuis son `pyproject.toml`, à l'identique. Le régénérer par `uv lock` quand une
+  dépendance bouge. ⚠️ **Monter un plancher reste un geste séparé** : ce fichier rend le
+  dépôt observable, il ne le répare pas.
 
 ## Architecture
 
