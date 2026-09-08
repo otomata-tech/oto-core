@@ -88,6 +88,52 @@ class ApolloClient:
             )
         return response.json()
 
+    def _request_tolerating(self, method: str, endpoint: str,
+                            tolere: tuple, **kwargs) -> tuple:
+        """Comme `_request`, mais rend `(status, corps)` sans lever pour les
+        statuts DÉCLARÉS dans `tolere` — tout autre statut lève `ApolloError`
+        comme d'habitude.
+
+        Existe pour le sondage de webhook, où **un 404 ne veut pas dire erreur**
+        mais « pas encore prêt ». `_request` ne peut pas servir ce cas : il lève
+        sur tout non-2xx, et `_upstream_message` réduit le corps à une phrase —
+        or c'est le corps qu'il faut lire ici (`error_code`, `retry_after_seconds`).
+        La liste des statuts tolérés est un ARGUMENT, jamais un défaut : un
+        appelant qui n'en déclare aucun retrouve exactement le comportement de
+        `_request`.
+        """
+        self._rate_limit()
+
+        url = f"{self.BASE_URL}/{endpoint}"
+        headers = {"X-Api-Key": self.api_key, "Content-Type": "application/json"}
+
+        response = requests.request(method, url, headers=headers,
+                                    timeout=_HTTP_TIMEOUT, **kwargs)
+        if not response.ok and response.status_code not in tolere:
+            raise ApolloError(
+                f"Apollo {response.status_code} sur {endpoint} : "
+                f"{self._upstream_message(response)}",
+                status_code=response.status_code,
+            )
+        try:
+            return response.status_code, response.json()
+        except ValueError:
+            # ⚠️ `requests.exceptions.JSONDecodeError` HÉRITE de `ValueError` :
+            # un `except ValueError` nu attraperait donc aussi un 200 au corps
+            # vide ou en HTML (page d'erreur d'un proxy, maintenance) et le
+            # rendrait comme un corps VIDE — que l'appelant lirait « prêt, mais
+            # rien dedans ». C'est la divergence muette exactement : le geste
+            # réussit et le relevé ment. Seul un statut TOLÉRÉ a le droit de
+            # revenir sans corps, parce que c'est le statut qui porte le sens ;
+            # un succès illisible est une panne, et se dit.
+            if response.status_code in tolere:
+                return response.status_code, {}
+            raise ApolloError(
+                f"Apollo {response.status_code} sur {endpoint} a répondu un corps "
+                f"non-JSON : {(response.text or '').strip()[:200]!r}",
+                status_code=response.status_code,
+            )
+
     def search_organizations(
         self,
         name: str = None,
@@ -276,6 +322,9 @@ class ApolloClient:
         name: str = None,
         domain: str = None,
         org_name: str = None,
+        reveal_personal_emails: bool = None,
+        reveal_phone_number: bool = None,
+        webhook_url: str = None,
     ) -> Optional[Dict[str, Any]]:
         """
         Match a specific person (enrichment — 1 crédit Apollo par appel).
@@ -290,6 +339,17 @@ class ApolloClient:
             name: Full name
             domain: Company domain
             org_name: Organization name
+            reveal_personal_emails: demande les emails PERSONNELS. Synchrone —
+                ils reviennent dans la réponse. Coût crédit selon le plan Apollo.
+            reveal_phone_number: demande les téléphones, MOBILE ET DIRECT DIAL
+                compris. ⚠️ Ces numéros-là ne reviennent PAS dans la réponse :
+                Apollo les vérifie de son côté et les POSTe, plusieurs minutes
+                plus tard, à `webhook_url` — la réponse ne porte que
+                `request_id`, à repasser à `poll_webhook_result` pour les relire
+                sans webhook et sans crédit. Exige `webhook_url`.
+            webhook_url: où Apollo POSTe les téléphones. OBLIGATOIRE dès que
+                `reveal_phone_number`, et interdit sinon (Apollo :
+                « Otherwise, do not use this parameter »).
 
         Returns:
             Matched person data, ou None (404). La fiche porte `_stub: True` quand
@@ -310,6 +370,24 @@ class ApolloClient:
                 "(l'id rendu par search_people), `email` ou `linkedin_url` — sinon un "
                 "nom COMPLET (prénom + nom). Un prénom + une société ne matchent pas : "
                 "Apollo crée une fiche vide et consomme quand même le crédit.")
+
+        # Les deux paramètres de reveal du téléphone vont PAR PAIRE, et Apollo le
+        # dit dans les deux sens : « If this parameter is set to `true`, you must
+        # enter a webhook URL » / « Otherwise, do not use this parameter ». Sans
+        # webhook il répond « Please add a valid 'webhook_url' parameter » — un
+        # aller-retour pour rien ; avec un webhook mais sans le drapeau, il ne
+        # refuse RIEN et n'enverra jamais rien, ce qui est pire : l'appelant
+        # attend un POST qui ne partira pas. On refuse les deux moitiés ici.
+        if reveal_phone_number and not webhook_url:
+            raise ValueError(
+                "`reveal_phone_number` exige `webhook_url` : Apollo ne rend pas "
+                "les mobiles dans la réponse, il les POSTe à cette URL quelques "
+                "minutes plus tard. Sans elle l'appel est refusé par Apollo.")
+        if webhook_url and not reveal_phone_number:
+            raise ValueError(
+                "`webhook_url` ne sert QUE le reveal de téléphone : passe aussi "
+                "`reveal_phone_number=True`, sinon Apollo n'enverra jamais rien "
+                "à cette URL.")
 
         data = {}
         if person_id:
@@ -332,8 +410,27 @@ class ApolloClient:
         if org_name:
             data["organization_name"] = org_name
 
+        # ⚠️ Les trois paramètres de CONTRÔLE partent en QUERY STRING, pas dans le
+        # corps : le contrat publié par Apollo pour `people/match` ne déclare
+        # AUCUN `requestBody`, ses 14 paramètres sont tous `in: query`, et son
+        # propre exemple les y met. L'identité, elle, reste dans le corps — c'est
+        # ce que ce client fait depuis toujours et Apollo la lit bien de là
+        # (`domain` participe au match, vérifié le 2026-08-04). Et les booléens
+        # se sérialisent À LA MAIN : `requests` écrirait `reveal_phone_number=True`
+        # (majuscule Python), là où l'API attend `true` — une API qui ignore en
+        # silence ce qu'elle ne reconnaît pas ne rendrait aucune erreur, juste un
+        # reveal qui n'a pas lieu et un appelant qui attend un POST pour rien.
+        params = {}
+        for nom, valeur in (("reveal_personal_emails", reveal_personal_emails),
+                            ("reveal_phone_number", reveal_phone_number)):
+            if valeur is not None:
+                params[nom] = "true" if valeur else "false"
+        if webhook_url:
+            params["webhook_url"] = webhook_url
+
         try:
-            out = self._request("POST", "people/match", json=data)
+            out = self._request("POST", "people/match", json=data,
+                                params=params or None)
         except ApolloError as e:
             if e.status_code == 404:
                 return None
@@ -342,6 +439,50 @@ class ApolloClient:
         if self._looks_like_stub(person):
             person["_stub"] = True
         return out
+
+    def poll_webhook_result(self, request_id) -> Dict[str, Any]:
+        """Relire le résultat qu'Apollo a envoyé (ou enverra) à un webhook.
+
+        C'est ce qui rend le reveal de téléphone utilisable SANS héberger de
+        receveur : `match_person(reveal_phone_number=True, …)` rend un
+        `request_id`, et cet endpoint rend le même contenu que le POST — pendant
+        **trente jours**, pour **0 crédit**.
+
+        Args:
+            request_id: celui rendu par `match_person`. Entier signé 64 bits :
+                il peut être NÉGATIF et il dépasse la précision d'un nombre
+                JavaScript — on le transporte en CHAÎNE, tel quel, jamais
+                reconverti.
+
+        Returns:
+            `{"done": False, "retry_after_seconds": int}` tant qu'Apollo
+            travaille, `{"done": True, "result": {…}}` quand c'est prêt.
+
+        ⚠️ **Un 404 ici ne veut pas dire « erreur »** : tant que le résultat n'est
+        pas prêt, Apollo répond 404 avec `error_code: "result_pending"` et le
+        délai à attendre. Seuls les trois autres cas sont terminaux et lèvent —
+        `request_id_unknown` (jamais émis), `request_id_expired` (au-delà des 30
+        jours) et `invalid_request_id`.
+        """
+        rid = str(request_id).strip()
+        if not rid or not rid.lstrip("-").isdigit():
+            # Apollo répondrait 400 `invalid_request_id` : autant le dire ici,
+            # où l'on peut nommer d'où vient la valeur attendue.
+            raise ValueError(
+                "`request_id` doit être l'entier rendu par match_person "
+                f"(entier signé 64 bits, éventuellement négatif) — reçu : {rid!r}")
+
+        status, body = self._request_tolerating(
+            "GET", f"webhook_result/{rid}", tolere=(404,))
+        body = body if isinstance(body, dict) else {}
+        if status == 404:
+            if body.get("error_code") == "result_pending":
+                return {"done": False,
+                        "retry_after_seconds": body.get("retry_after_seconds")}
+            raise ApolloError(
+                f"Apollo 404 sur webhook_result/{rid} : "
+                f"{body.get('error_code') or body}", status_code=404)
+        return {"done": True, "result": body}
 
     def get_job_postings(self, org_id: str) -> Dict[str, Any]:
         """
