@@ -271,6 +271,82 @@ def test_list_invitations_type_param():
     assert params["type"] == "sent" and params["limit"] == 10
 
 
+def test_list_invitations_never_sends_cursor_upstream():
+    """LA régression. `relation-requests` est paginé par offset et REFUSE tout
+    param hors limit/meta_only à côté d'un `cursor` ; `type` étant obligatoire,
+    toute page 2 rendait `Unipile 400: ... Unexpected parameters: type`. Le
+    curseur rendu est FABRIQUÉ par nous : il se décode en offset et ne part
+    jamais en amont."""
+    rec = []
+    c = _client(canned={"data": [{"id": "a"}]}, recorder=rec)
+    c.list_invitations(direction="sent", limit=100, cursor="off:100")
+    _, _, params, _ = rec[0]
+    assert "cursor" not in params
+    assert params["offset"] == 100
+    assert params["type"] == "sent"      # toujours envoyé : param REQUIS
+
+
+def test_list_invitations_mints_next_cursor():
+    """Le tool annonce « Paginé » : l'amont ne rendant jamais de `next_cursor`,
+    on le fabrique — sinon l'appelant n'a rien à repasser."""
+    c = _client(canned={"data": [{"id": "a"}, {"id": "b"}]})
+    out = c.list_invitations(direction="sent", limit=2)
+    assert out["next_cursor"] == "off:2"
+    assert out["cursor"] == "off:2"
+    # et il se reboucle : le curseur rendu redevient l'offset suivant
+    rec = []
+    c2 = _client(canned={"data": [{"id": "c"}]}, recorder=rec)
+    c2.list_invitations(direction="sent", limit=2, cursor=out["next_cursor"])
+    assert rec[0][2]["offset"] == 2
+
+
+def test_list_invitations_empty_page_ends_pagination():
+    """Fin de liste = `data` vide (contrat Unipile), PAS une page courte : sans
+    curseur rendu, la boucle appelante s'arrête."""
+    c = _client(canned={"data": []})
+    out = c.list_invitations(direction="sent", limit=50)
+    assert "next_cursor" not in out and "cursor" not in out
+
+
+def test_list_invitations_short_page_still_advances_by_limit():
+    """Une page courte n'est PAS la fin : le provider filtre dans la fenêtre.
+    On avance de `limit` (contrat Unipile), pas de `len(data)` — sinon on
+    re-sert les mêmes items."""
+    c = _client(canned={"data": [{"id": "a"}] * 90})
+    out = c.list_invitations(direction="sent", limit=100)
+    assert out["next_cursor"] == "off:100"
+
+
+def test_list_invitations_foreign_cursor_raises_locally():
+    """Un curseur qui n'est pas le nôtre est refusé ICI, avec un message qui se
+    lit — transmis, il rendait le 400 « Unexpected parameters: type »."""
+    rec = []
+    c = _client(canned={"data": []}, recorder=rec)
+    with pytest.raises(UnipileError, match="curseur invalide"):
+        c.list_invitations(direction="sent", cursor="eyJvZmZzZXQiOjEwMH0=")
+    assert rec == []                     # rien n'est parti en amont
+
+
+def test_list_invitations_limit_bounds():
+    """101 et 200 rendaient `Unipile 400: Invalid querystring`, qui ne nomme ni
+    le param ni la borne (observé 2026-09-10). On tranche localement."""
+    rec = []
+    c = _client(canned={"data": []}, recorder=rec)
+    with pytest.raises(UnipileError, match="entre 1 et 100"):
+        c.list_invitations(direction="sent", limit=200)
+    assert rec == []
+    c.list_invitations(direction="sent", limit=100)   # la borne passe
+    assert rec[0][2]["limit"] == 100
+
+
+def test_list_invitations_upstream_cursor_wins():
+    """Si Unipile se met un jour à rendre un vrai `next_cursor`, il gagne sur
+    le nôtre."""
+    c = _client(canned={"data": [{"id": "a"}], "next_cursor": "REAL"})
+    out = c.list_invitations(direction="sent", limit=1)
+    assert out["next_cursor"] == "REAL" and out["cursor"] == "REAL"
+
+
 def test_send_invitation_body():
     rec = []
     c = _client(canned={}, recorder=rec)

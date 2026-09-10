@@ -64,7 +64,7 @@ EXPECTED_MEMBERS = {
     'list_following': "(self, user_id: 'Optional[str]' = None, cursor: 'Optional[str]' = None, limit: 'Optional[int]' = None) -> 'dict'",
     'list_hiring_projects': "(self, cursor: 'Optional[str]' = None, limit: 'Optional[int]' = None) -> 'dict'",
     'list_inboxes': "(self) -> 'dict'",
-    'list_invitations': "(self, direction: 'str' = 'received', limit: 'Optional[int]' = None, cursor: 'Optional[str]' = None) -> 'dict'",
+    'list_invitations': "(self, direction: 'str' = 'received', limit: 'Optional[int]' = None, cursor: 'Optional[str]' = None, offset: 'Optional[int]' = None) -> 'dict'",
     'list_job_applicants': "(self, job_id: 'str', cursor: 'Optional[str]' = None, limit: 'Optional[int]' = None) -> 'dict'",
     'list_job_postings': "(self, cursor: 'Optional[str]' = None, limit: 'Optional[int]' = None) -> 'dict'",
     'list_member_comments': "(self, identifier: 'str', cursor: 'Optional[str]' = None, limit: 'Optional[int]' = None) -> 'dict'",
