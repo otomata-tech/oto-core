@@ -27,6 +27,18 @@ MAX_CONTACTS_PER_JOB = 100
 DEFAULT_ENRICH_FIELDS = ["contact.work_emails", "contact.phones"]
 
 
+def _cost_credits(body) -> int | None:
+    """`cost.credits` d'un résultat de job, s'il s'agit d'un entier `>= 0` — sinon `None`.
+
+    `bool` est écarté explicitement (`True` est un `int` en Python) : un drapeau n'est
+    pas un nombre de crédits, et le prendre pour `1` inventerait une consommation."""
+    cost = body.get("cost") if isinstance(body, dict) else None
+    credits = cost.get("credits") if isinstance(cost, dict) else None
+    if isinstance(credits, bool) or not isinstance(credits, int) or credits < 0:
+        return None
+    return credits
+
+
 class FullenrichProfile:
     """Parsed enrichment result for 1 LinkedIn profile."""
 
@@ -157,8 +169,15 @@ class FullenrichClient:
 
     def fetch(self, enrichment_id: str) -> dict:
         """Un GET de statut, sans attente. Retourne
-        `{"status": <str>, "profiles": [FullenrichProfile] | None}` —
-        `profiles` n'est peuplé que si status == FINISHED."""
+        `{"status": <str>, "profiles": [FullenrichProfile] | None, "cost_credits": int | None}` —
+        `profiles` n'est peuplé que si status == FINISHED.
+
+        `cost_credits` = les crédits que FULLENRICH a déduits pour ce job, tels que
+        l'amont les déclare (`cost.credits` du résultat, agrégé sur tout le job — pas de
+        détail par contact). Lu dans la réponse, jamais recalculé ici : le barème
+        (1 / 3 / 10 par valeur trouvée) est celui de l'amont et peut changer sans
+        prévenir. `None` quand la réponse n'en porte pas un entier `>= 0`, quel que
+        soit le statut."""
         resp = requests.get(
             f"{self.BASE_URL}/contact/enrich/bulk/{enrichment_id}",
             headers=self._headers(),
@@ -169,15 +188,16 @@ class FullenrichClient:
 
         body = resp.json()
         status = body.get("status", "")
+        cost_credits = _cost_credits(body)
 
         if status == "CREDITS_INSUFFICIENT":
             raise RuntimeError("FullEnrich : crédits insuffisants. Recharger sur app.fullenrich.com.")
 
         if status != "FINISHED":
-            return {"status": status, "profiles": None}
+            return {"status": status, "profiles": None, "cost_credits": cost_credits}
 
         profiles = [self._parse(item) for item in body.get("data", [])]
-        return {"status": status, "profiles": profiles}
+        return {"status": status, "profiles": profiles, "cost_credits": cost_credits}
 
     def _parse(self, item: dict) -> FullenrichProfile:
         contact = item.get("contact_info") or {}

@@ -64,7 +64,45 @@ def test_fetch_in_progress(monkeypatch):
     monkeypatch.setattr(fe.requests, "get",
                         lambda url, headers=None, timeout=None: _Resp(200, {"status": "IN_PROGRESS"}))
     out = FullenrichClientFixture().fetch("abc123")
-    assert out == {"status": "IN_PROGRESS", "profiles": None}
+    assert out == {"status": "IN_PROGRESS", "profiles": None, "cost_credits": None}
+
+
+def test_fetch_in_progress_reports_the_cost_the_upstream_already_declares(monkeypatch):
+    monkeypatch.setattr(fe.requests, "get",
+                        lambda url, headers=None, timeout=None: _Resp(
+                            200, {"status": "IN_PROGRESS", "cost": {"credits": 0}}))
+    out = FullenrichClientFixture().fetch("abc123")
+    assert out == {"status": "IN_PROGRESS", "profiles": None, "cost_credits": 0}
+
+
+def test_fetch_finished_reports_the_credits_fullenrich_deducted(monkeypatch):
+    """`cost_credits` est le `cost.credits` de l'amont, tel quel — jamais recalculé
+    depuis les valeurs trouvées (le barème est celui de FullEnrich)."""
+    body = {"status": "FINISHED", "cost": {"credits": 14},
+            "data": [{"custom": {"slug": "a-b"},
+                      "contact_info": {"phones": [{"number": "+33600000000"}],
+                                       "work_emails": [{"email": "a@b.fr"}]}}]}
+    monkeypatch.setattr(fe.requests, "get",
+                        lambda url, headers=None, timeout=None: _Resp(200, body))
+    out = FullenrichClientFixture().fetch("abc123")
+    assert out["status"] == "FINISHED"
+    assert out["cost_credits"] == 14
+    assert len(out["profiles"]) == 1
+
+
+@pytest.mark.parametrize("cost", [
+    None, {}, {"credits": None}, {"credits": "14"}, {"credits": 1.5},
+    {"credits": -1}, {"credits": True}, 14, "14",
+])
+def test_fetch_a_malformed_or_missing_cost_is_none_never_a_guess(monkeypatch, cost):
+    body = {"status": "FINISHED", "data": []}
+    if cost is not None:
+        body["cost"] = cost
+    monkeypatch.setattr(fe.requests, "get",
+                        lambda url, headers=None, timeout=None: _Resp(200, body))
+    out = FullenrichClientFixture().fetch("abc123")
+    assert out["status"] == "FINISHED"
+    assert out["cost_credits"] is None
 
 
 def test_fetch_finished_parses_profiles(monkeypatch):
