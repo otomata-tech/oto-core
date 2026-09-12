@@ -12,8 +12,10 @@ name: Tag release (poser un tag de version)
 # sans bump fait mentir `pip show oto-core`, vécu le 2026-06-22).
 #
 # NB : un tag créé avec le GITHUB_TOKEN ne déclenche aucun autre workflow
-# (garde anti-récursion GitHub). Ici c'est sans effet : rien ne s'abonne aux
-# tags dans ce repo.
+# (garde anti-récursion GitHub). Or publish.yml s'abonne aux tags `v*` (publication
+# PyPI, 2026-09-12) : un tag posé ici ne le déclencherait PAS, et la version ne
+# partirait jamais sur PyPI, en silence. Ce workflow dispatche donc publish.yml
+# explicitement — workflow_dispatch est l'exception à cette garde.
 on:
   workflow_dispatch:
     inputs:
@@ -23,6 +25,7 @@ on:
 
 permissions:
   contents: write
+  actions: write # dispatcher publish.yml
 
 jobs:
   tag:
@@ -54,3 +57,8 @@ jobs:
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git tag "$DEMANDEE"
           git push origin "refs/tags/$DEMANDEE"
+      - name: Publier sur PyPI (dispatch de publish.yml)
+        env:
+          DEMANDEE: ${{ inputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run publish.yml --repo "$GITHUB_REPOSITORY" --ref main -f tag="$DEMANDEE"
